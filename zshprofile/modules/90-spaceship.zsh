@@ -1,86 +1,105 @@
 # ════════════════════════════════════════════════════════════════════
-#  90-spaceship — prompt config. LOADS LAST (must come AFTER the theme;
-#  Spaceship options only take effect when set after OMZ loaded it).
+#  90-spaceship — prompt config. LOADS LAST (after the theme).
 #
-#  SPEED PRINCIPLE (from Spaceship docs): the prompt order ALSO decides
-#  which sections load. Sections you omit are never loaded. So we list
-#  ONLY your stack: dir, git, node, python, docker, kubectl, aws.
-#  Async is on by default → slow git status runs off the main thread.
+#  LAYOUT (three lines; line 2 is conditional):
+#    line 1 (always)    : TIME  dir  git  python  exec_time
+#    line 2 (venv only) : venv:<path-from-~>   (yellow; absent if no venv)
+#    line 3 (always)    : exit_code(bold white)  ➜
+#
+#  docker / kubectl / aws kept in ORDER but hidden via *_SHOW=false
+#  (flip to true to re-enable). Async on → git status off main thread.
 # ════════════════════════════════════════════════════════════════════
 
-# ── Async on (default, but pinned explicitly for clarity) ──────────
+# ── Async + multi-line ─────────────────────────────────────────────
 SPACESHIP_PROMPT_ASYNC=true
-
-# ── Two-line prompt, blank line between commands (readable) ────────
 SPACESHIP_PROMPT_ADD_NEWLINE=true
 SPACESHIP_PROMPT_SEPARATE_LINE=true
 
-# ── LEAN ORDER — the #1 prompt-speed lever. Only your stack. ───────
-# Everything not listed (ruby/go/php/rust/java/azure/gcp/terraform/…)
-# is NEVER loaded → faster prompt, less clutter.
+# ── Custom section: yellow venv path (line 2), from ~, no /.venv ────
+# Spaceship has no "venv path from home" section, so we define one.
+# It emits ONLY when a virtualenv is active ($VIRTUAL_ENV set).
+# We strip a trailing /.venv (or /venv, /env) and rewrite $HOME → ~.
+# When no venv: prints nothing → the surrounding line_sep collapses,
+# so line 2 disappears entirely (no empty line).
+spaceship_venvpath() {
+  [[ -n "$VIRTUAL_ENV" ]] || return            # no venv → emit nothing
+  local p="${VIRTUAL_ENV}"
+  p="${p%/.venv}"; p="${p%/venv}"; p="${p%/env}"   # drop the suffix
+  p="${p/#$HOME/~}"                            # $HOME → ~
+  spaceship::section --color yellow "venv:${p}"
+}
+
+# ── Prompt order (the layout) ──────────────────────────────────────
 SPACESHIP_PROMPT_ORDER=(
-  dir            # current directory
-  git            # branch + dirty status (async)
-  node           # Node version — only shows in JS/Svelte projects
-  python         # Python version — only shows in FastAPI projects
-  docker         # Docker context — only in dirs with Dockerfile
-  kubectl        # k8s context — only when kubeconfig active
-  aws            # AWS profile — only when AWS_PROFILE set
-  venv           # active virtualenv (FastAPI .venv)
-  exec_time      # how long the last command took
-  line_sep       # ← line break: everything above on line 1
-  jobs           # background jobs indicator
-  exit_code      # non-zero exit shown explicitly
-  char           # the prompt character (➜)
+  time           # line 1: timestamp (12hr, seconds) — START of line
+  dir            # line 1: current directory
+  git            # line 1: branch + status (async)
+  python         # line 1: Python version (Python projects only)
+  docker         # (hidden — SHOW=false below; kept for easy re-enable)
+  kubectl        # (hidden — SHOW=false below)
+  aws            # (hidden — SHOW=false below)
+  exec_time      # line 1: duration, only if last cmd > 5s
+  line_sep       # ── break → end of line 1 ──
+  venvpath       # line 2: yellow venv path; NOTHING if no venv
+  line_sep       # ── break → end of line 2 (collapses if venvpath empty)
+  jobs           # line 3: background jobs indicator
+  exit_code      # line 3: last exit code (bold white)
+  char           # line 3: the ➜ prompt character
 )
-# Right side kept empty — less rendering, cleaner.
 SPACESHIP_RPROMPT_ORDER=()
 
-# ── Directory: short, fast, repo-aware ─────────────────────────────
-SPACESHIP_DIR_TRUNC=3                 # show at most 3 trailing path parts
-SPACESHIP_DIR_TRUNC_REPO=true         # inside a repo: show path from repo root
+# ── Time: 12-hour, with seconds, at the very start of line 1 ───────
+SPACESHIP_TIME_SHOW=true
+SPACESHIP_TIME_12HR=true              # 12-hour clock (AM/PM)
+SPACESHIP_TIME_FORMAT='%D{%I:%M:%S %p}'   # e.g. 02:32:05 PM
+SPACESHIP_TIME_COLOR="244"           # soft grey — present, not loud
+SPACESHIP_TIME_PREFIX=""             # nothing before it (it's first)
+SPACESHIP_TIME_SUFFIX=" "            # single space before dir
+
+# ── Directory ──────────────────────────────────────────────────────
+SPACESHIP_DIR_TRUNC=3
+SPACESHIP_DIR_TRUNC_REPO=true
 SPACESHIP_DIR_COLOR="cyan"
 
-# ── Git: the section you care about most ───────────────────────────
+# ── Git ────────────────────────────────────────────────────────────
 SPACESHIP_GIT_PREFIX="on "
 SPACESHIP_GIT_BRANCH_COLOR="magenta"
 SPACESHIP_GIT_STATUS_COLOR="red"
 SPACESHIP_GIT_STATUS_PREFIX=" ["
 SPACESHIP_GIT_STATUS_SUFFIX="]"
-# (git status is async by default — never blocks your typing)
 
-# ── Node / Python / venv: version only in relevant project dirs ────
-SPACESHIP_NODE_PREFIX="node "
-SPACESHIP_NODE_COLOR="green"
+# ── Python version (kept — shows in Python projects) ───────────────
+SPACESHIP_PYTHON_SHOW=true
 SPACESHIP_PYTHON_PREFIX="py "
 SPACESHIP_PYTHON_COLOR="yellow"
-SPACESHIP_PYTHON_SYMBOL=""            # drop the symbol, keep it lean
-SPACESHIP_VENV_COLOR="blue"
-SPACESHIP_VENV_GENERIC_NAMES=(.venv venv env)
+SPACESHIP_PYTHON_SYMBOL=""
 
-# ── Docker / Kubernetes / AWS: context awareness for your workflow ─
+# ── Docker / Kubernetes / AWS: HIDDEN (flip SHOW→true to re-enable) ─
+SPACESHIP_DOCKER_SHOW=false
 SPACESHIP_DOCKER_PREFIX="on "
 SPACESHIP_DOCKER_COLOR="blue"
 SPACESHIP_DOCKER_SYMBOL="🐳 "
-SPACESHIP_KUBECTL_SHOW=true
+SPACESHIP_KUBECTL_SHOW=false
 SPACESHIP_KUBECTL_PREFIX="at "
 SPACESHIP_KUBECTL_COLOR="cyan"
-SPACESHIP_KUBECTL_VERSION_SHOW=false  # context only, skip version (faster)
+SPACESHIP_KUBECTL_VERSION_SHOW=false
+SPACESHIP_AWS_SHOW=false
 SPACESHIP_AWS_PREFIX="using "
-SPACESHIP_AWS_COLOR="208"             # AWS orange (256-color code)
+SPACESHIP_AWS_COLOR="208"
 SPACESHIP_AWS_SYMBOL="☁ "
 
-# ── Exec time: only flag genuinely slow commands ───────────────────
+# ── Exec time: only flag genuinely slow commands (>5s) ─────────────
 SPACESHIP_EXEC_TIME_SHOW=true
-SPACESHIP_EXEC_TIME_ELAPSED=5         # only show if cmd took >5s
-SPACESHIP_EXEC_TIME_COLOR="240"       # dim grey, non-distracting
+SPACESHIP_EXEC_TIME_ELAPSED=5
+SPACESHIP_EXEC_TIME_COLOR="240"
 
-# ── Exit code: make failures impossible to miss ────────────────────
+# ── Exit code: shown on failure, BOLD WHITE (calm, not red) ────────
 SPACESHIP_EXIT_CODE_SHOW=true
-SPACESHIP_EXIT_CODE_PREFIX="✘ "
-SPACESHIP_EXIT_CODE_COLOR="red"
+SPACESHIP_EXIT_CODE_PREFIX="%B%F{white}✘ "
+SPACESHIP_EXIT_CODE_SUFFIX="%f%b "
+SPACESHIP_EXIT_CODE_COLOR="white"
 
-# ── Prompt char: green normally, red after a failed command ────────
+# ── Prompt char: green ok / white on failure (calm) ────────────────
 SPACESHIP_CHAR_SYMBOL="➜ "
 SPACESHIP_CHAR_COLOR_SUCCESS="green"
-SPACESHIP_CHAR_COLOR_FAILURE="red"
+SPACESHIP_CHAR_COLOR_FAILURE="white"
