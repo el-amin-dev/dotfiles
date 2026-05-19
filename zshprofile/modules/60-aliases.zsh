@@ -11,23 +11,30 @@
 (( $+commands[batcat] )) && alias bat='batcat'
 # After this, $FZF_DEFAULT_COMMAND='fd …' and your 'bat' habit both work.
 
-# ── eza: modern ls (icons, git-aware, tree) ────────────────────────
+# ── eza: modern ls (git-aware, tree). NO icons (plain, as requested) ─
+# Icons removed deliberately: no Nerd Font folder/music/picture glyphs
+# in listings — output stays plain like classic ls, just colored and
+# git-aware. Re-add --icons=auto here if you ever want them back.
 if (( $+commands[eza] )); then
-  alias ls='eza --group-directories-first --icons=auto'
-  alias l='eza -lbF --git --group-directories-first --icons=auto'
-  alias ll='eza -lbGF --git --header --group-directories-first --icons=auto'
-  alias la='eza -lbhHigUmuSa --git --color-scale --icons=auto'
-  alias lt='eza --tree --level=2 --icons=auto'
-  alias ltt='eza --tree --level=4 --icons=auto'
+  alias ls='eza --group-directories-first'
+  alias l='eza -lbF --git --group-directories-first'
+  alias ll='eza -lbGF --git --header --group-directories-first'
+  alias la='eza -lbhHigUmuSa --git --color-scale'
+  alias lt='eza --tree --level=2'
+  alias ltt='eza --tree --level=4'
 else
   alias ll='ls -lh'
   alias la='ls -lAh'
 fi
 
-# ── bat: better cat (resolves to batcat alias on Ubuntu) ───────────
+# ── bat: cat replacement. ALL behavior lives in config/bat.conf ────
+# (no-pager default, git +/~ change gutter, line numbers, header).
+# Aliases only map names now — no flags here, so cat / catt / and the
+# bat previews in fe/fco/fcd are guaranteed identical. That single
+# source of truth is the whole point of the bat.conf approach.
 if (( $+commands[bat] )) || (( $+commands[batcat] )); then
-  alias cat='bat --paging=never'        # plain reads, syntax-colored
-  alias catt='bat'                      # paged view when you want it
+  alias cat='bat'                       # colored, no-pager (per bat.conf)
+  alias catt='bat --paging=always'      # opt-in paged view when wanted
   # raw, unstyled cat still available as \cat  or  command cat
 fi
 

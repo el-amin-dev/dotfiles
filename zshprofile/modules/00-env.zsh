@@ -23,8 +23,16 @@ export EDITOR="vim"
 export VISUAL="vim"
 export PAGER="less"
 
-# ── bat as the pager / man colorizer (you prefer bat over cat) ─────
-export BAT_THEME="ansi"
+# ── bat: single source of truth is the in-repo config file ─────────
+# All bat behavior (no-pager default, git change gutter, style, theme)
+# lives in $ZSH_PROFILE_DIR/config/bat.conf. Pointing BAT_CONFIG_PATH
+# here means EVERY bat call obeys it: the `cat` alias, `catt`, and the
+# bat previews inside the fzf functions (fe / fco / fcd). One config,
+# consistent everywhere, portable, $HOME stays clean.
+export BAT_CONFIG_PATH="$ZSH_PROFILE_DIR/config/bat.conf"
+
+# ── man pages rendered through bat (colorized man) ─────────────────
+# bat.conf handles paging/style; here we only route man → bat.
 export MANPAGER="sh -c 'col -bx | bat -l man -p'"
 export MANROFFOPT="-c"
 

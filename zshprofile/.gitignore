@@ -1,20 +1,37 @@
-# ── External (cloned) code — never track, reinstalled via install.sh ──
-external/oh-my-zsh/
-external/plugins/
-# keep the empty dirs so structure survives a fresh clone
-!external/
+# ════════════════════════════════════════════════════════════════════
+#  .gitignore — what NEVER enters git history
+#
+#  Philosophy: external code is FETCHED by install.sh, never vendored.
+#  Machine state and runtime caches never leave this machine.
+#  Directory skeletons survive a fresh clone via tracked .gitkeep files
+#  (NOT via negation rules — those leaked embedded git repos as
+#  broken gitlinks, which is why this file was rewritten).
+# ════════════════════════════════════════════════════════════════════
+
+# ── External (cloned) code — ALL of it, unconditionally ────────────
+# Oh My Zsh, Spaceship, and plugins are cloned by install.sh. They
+# contain their own .git dirs; tracking them creates broken gitlinks.
+# Ignore the entire tree. The skeleton is preserved by the tracked
+# .gitkeep files explicitly re-included below.
+external/*
+external/plugins/*
+
+# Re-include ONLY the empty-dir markers so the structure survives a
+# fresh clone (install.sh repopulates the rest).
+!external/.gitkeep
 !external/plugins/
+external/plugins/*
 !external/plugins/.gitkeep
 
-# ── Machine-specific overrides — never leave this machine ──
+# ── Machine-specific overrides — never leave this machine ──────────
 local/*
 !local/.gitkeep
 
-# ── Runtime cache — zcompdump, history, etc. ──
+# ── Runtime cache — zcompdump, history, compcache, etc. ────────────
 cache/*
 !cache/.gitkeep
 
-# ── Editor / OS noise ──
+# ── Editor / OS noise ──────────────────────────────────────────────
 *.swp
 *.swo
 *~

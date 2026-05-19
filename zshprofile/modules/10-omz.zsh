@@ -9,14 +9,31 @@ if [[ ! -d "$ZSH" ]]; then
   return
 fi
 
-# ── Theme: Spaceship ───────────────────────────────────────────────
-# Spaceship is cloned by install.sh into OMZ's custom/themes dir.
-ZSH_THEME="spaceship"
+# ── ZSH_CUSTOM must point at OMZ's REAL custom dir ─────────────────
+# install.sh clones Spaceship into  $ZSH/custom/themes/spaceship-prompt
+# and symlinks  $ZSH/custom/themes/spaceship.zsh-theme.
+# OMZ resolves themes from  $ZSH_CUSTOM/themes/  — so ZSH_CUSTOM MUST
+# be $ZSH/custom (NOT external/). This line is the theme-not-found fix.
+ZSH_CUSTOM="$ZSH/custom"
 
-# ── Tell OMZ where our self-cloned plugins live ────────────────────
-# OMZ looks in $ZSH_CUSTOM/plugins. We point ZSH_CUSTOM at our repo's
-# external/ so autosuggestions + syntax-highlighting are found.
-ZSH_CUSTOM="$ZSH_PROFILE_DIR/external"
+# ── Self-heal: link our cloned plugins into $ZSH_CUSTOM/plugins ────
+# Our plugins live in external/plugins (git-ignored, cloned by
+# install.sh). OMZ looks for custom plugins in $ZSH_CUSTOM/plugins.
+# We symlink them in once (idempotent: -sfn, skipped if already
+# correct). Near-zero cost, and makes a fresh clone "just work"
+# without editing install.sh.
+() {
+  local src dst name
+  for src in "$ZSH_CUSTOM_PLUGINS"/*(N/); do
+    name="${src:t}"
+    dst="$ZSH_CUSTOM/plugins/$name"
+    [[ -L "$dst" && "$dst:A" == "$src:A" ]] && continue
+    ln -sfn "$src" "$dst"
+  done
+}
+
+# ── Theme: Spaceship ───────────────────────────────────────────────
+ZSH_THEME="spaceship"
 
 # ── Behavior tweaks ────────────────────────────────────────────────
 zstyle ':omz:update' mode disabled      # we manage updates via git/install.sh
