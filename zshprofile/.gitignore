@@ -1,0 +1,21 @@
+# ── External (cloned) code — never track, reinstalled via install.sh ──
+external/oh-my-zsh/
+external/plugins/
+# keep the empty dirs so structure survives a fresh clone
+!external/
+!external/plugins/
+!external/plugins/.gitkeep
+
+# ── Machine-specific overrides — never leave this machine ──
+local/*
+!local/.gitkeep
+
+# ── Runtime cache — zcompdump, history, etc. ──
+cache/*
+!cache/.gitkeep
+
+# ── Editor / OS noise ──
+*.swp
+*.swo
+*~
+.DS_Store
