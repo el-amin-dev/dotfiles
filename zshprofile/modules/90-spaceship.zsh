@@ -1,10 +1,11 @@
 # ════════════════════════════════════════════════════════════════════
 #  90-spaceship — prompt config. LOADS LAST (after the theme).
 #
-#  LAYOUT (three lines; line 2 is conditional):
-#    line 1 (always)    : TIME  dir  git  python  exec_time
-#    line 2 (venv only) : venv:<path-from-~>   (yellow; absent if no venv)
-#    line 3 (always)    : exit_code(bold white)  ➜
+#  LAYOUT (four lines; line 3 is conditional):
+#    line 1 (always)    : ──────── full-width dim separator
+#    line 2 (always)    : TIME  dir  git  python  exec_time
+#    line 3 (venv only) : venv:<path-from-~>  (yellow; absent if no venv)
+#    line 4 (always)    : exit_code(bold white)  ➜
 #
 #  docker / kubectl / aws kept in ORDER but hidden via *_SHOW=false
 #  (flip to true to re-enable). Async on → git status off main thread.
@@ -15,40 +16,55 @@ SPACESHIP_PROMPT_ASYNC=true
 SPACESHIP_PROMPT_ADD_NEWLINE=true
 SPACESHIP_PROMPT_SEPARATE_LINE=true
 
-# ── Custom section: yellow venv path (line 2), from ~, no /.venv ────
-# Spaceship has no "venv path from home" section, so we define one.
-# It emits ONLY when a virtualenv is active ($VIRTUAL_ENV set).
-# We strip a trailing /.venv (or /venv, /env) and rewrite $HOME → ~.
-# When no venv: prints nothing → the surrounding line_sep collapses,
-# so line 2 disappears entirely (no empty line).
+# ── Custom section: full-width separator (line 1) ──────────────────
+# Spaceship has no "horizontal rule" section, so we define one.
+# Repeats ─ across the FULL terminal width ($COLUMNS), edge to edge,
+# re-adjusting automatically when you resize. Dim grey (color 240).
+#
+# NOTE: the width MUST be resolved into a plain variable BEFORE the
+# (l:...) left-pad expansion — zsh rejects a nested ${..} inside the
+# pad-length position ("bad substitution"). That was the earlier bug.
+spaceship_sepline() {
+  local -i w=${COLUMNS:-80}            # resolve width first (plain int)
+  local line="${(l:$w::─:)}"          # now pad: repeat ─ exactly w times
+  spaceship::section --color 240 "$line"
+}
+
+# ── Custom section: yellow venv path, from ~, no /.venv suffix ─────
+# Emits ONLY when a virtualenv is active ($VIRTUAL_ENV set).
+# Strips trailing /.venv (or /venv, /env) and rewrites $HOME → ~.
+# When no venv: prints nothing → surrounding line_sep collapses,
+# so that line disappears entirely (no empty line).
 spaceship_venvpath() {
-  [[ -n "$VIRTUAL_ENV" ]] || return            # no venv → emit nothing
+  [[ -n "$VIRTUAL_ENV" ]] || return
   local p="${VIRTUAL_ENV}"
-  p="${p%/.venv}"; p="${p%/venv}"; p="${p%/env}"   # drop the suffix
-  p="${p/#$HOME/~}"                            # $HOME → ~
+  p="${p%/.venv}"; p="${p%/venv}"; p="${p%/env}"
+  p="${p/#$HOME/~}"
   spaceship::section --color yellow "venv:${p}"
 }
 
 # ── Prompt order (the layout) ──────────────────────────────────────
 SPACESHIP_PROMPT_ORDER=(
-  time           # line 1: timestamp (12hr, seconds) — START of line
-  dir            # line 1: current directory
-  git            # line 1: branch + status (async)
-  python         # line 1: Python version (Python projects only)
+  sepline        # line 1: ──────── full-width separator
+  line_sep       # ── break → end of line 1 ──
+  time           # line 2: timestamp (12hr, seconds) — START of line
+  dir            # line 2: current directory
+  git            # line 2: branch + status (async)
+  python         # line 2: Python version (Python projects only)
   docker         # (hidden — SHOW=false below; kept for easy re-enable)
   kubectl        # (hidden — SHOW=false below)
   aws            # (hidden — SHOW=false below)
-  exec_time      # line 1: duration, only if last cmd > 5s
-  line_sep       # ── break → end of line 1 ──
-  venvpath       # line 2: yellow venv path; NOTHING if no venv
-  line_sep       # ── break → end of line 2 (collapses if venvpath empty)
-  jobs           # line 3: background jobs indicator
-  exit_code      # line 3: last exit code (bold white)
-  char           # line 3: the ➜ prompt character
+  exec_time      # line 2: duration, only if last cmd > 5s
+  line_sep       # ── break → end of line 2 ──
+  venvpath       # line 3: yellow venv path; NOTHING if no venv
+  line_sep       # ── break → end of line 3 (collapses if venvpath empty)
+  jobs           # line 4: background jobs indicator
+  exit_code      # line 4: last exit code (bold white)
+  char           # line 4: the ➜ prompt character
 )
 SPACESHIP_RPROMPT_ORDER=()
 
-# ── Time: 12-hour, with seconds, at the very start of line 1 ───────
+# ── Time: 12-hour, with seconds, at the very start of line 2 ───────
 SPACESHIP_TIME_SHOW=true
 SPACESHIP_TIME_12HR=true              # 12-hour clock (AM/PM)
 SPACESHIP_TIME_FORMAT='%D{%I:%M:%S %p}'   # e.g. 02:32:05 PM
