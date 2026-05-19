@@ -42,3 +42,27 @@ zstyle ':completion:*' ignore-parents parent pwd
 # ── SSH/SCP host completion from known_hosts ───────────────────────
 zstyle ':completion:*:(ssh|scp|sftp):*' hosts \
        ${${${(f)"$(cat ~/.ssh/known_hosts(N) 2>/dev/null)"}%%[# ]*}//,/ }
+
+# ── AWS CLI v2 completion (FIX) ────────────────────────────────────
+# The OMZ aws plugin registers `complete -C aws_completer aws` using
+# the BARE name. At completion time zsh runs that as a command, and
+# bare-name resolution is unreliable (PATH context during completion
+# differs from the interactive shell), so `aws <Tab>` produced nothing.
+#
+# We re-register with the ABSOLUTE path AFTER OMZ has loaded, so it
+# always resolves. Guarded: only if the completer actually exists, and
+# we probe the common locations so this stays portable across install
+# methods (official installer → /usr/local/bin, apt, pip → ~/.local).
+() {
+  local c
+  for c in \
+      /usr/local/bin/aws_completer \
+      /usr/bin/aws_completer \
+      "$HOME/.local/bin/aws_completer"; do
+    if [[ -x "$c" ]]; then
+      complete -C "$c" aws       # explicit absolute path — robust
+      return 0
+    fi
+  done
+  # aws_completer not found → silently skip (no AWS CLI on this box)
+}
