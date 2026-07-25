@@ -1,5 +1,11 @@
 # ════════════════════════════════════════════════════════════════════
-#  90-spaceship — prompt config. LOADS LAST (after the theme).
+#  90-spaceship — prompt configuration. Loads after the theme itself,
+#  which Oh My Zsh sources at module 10 via $ZSH_THEME.
+#
+#  This is NOT the last module. 95-zoxide.zsh deliberately loads after
+#  it, because zoxide registers a chpwd hook and a prompt framework that
+#  rebuilds $chpwd_functions would drop it (ADR-004). Anything added
+#  here must not assume it runs last.
 #
 #  LAYOUT (four lines; line 3 is conditional):
 #    line 1 (always)    : ──────── full-width dim separator
