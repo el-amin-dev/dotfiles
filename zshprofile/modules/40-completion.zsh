@@ -6,10 +6,12 @@
 #  Zero extra startup cost: zstyle calls are instant, no subprocess.
 # ════════════════════════════════════════════════════════════════════
 
-# ── Where the compdump lives (repo cache, git-ignored) ─────────────
-# OMZ honors $ZSH_COMPDUMP. We set it here defensively in case OMZ
-# re-reads it; the real win is keeping it OUT of $HOME.
-export ZSH_COMPDUMP="$ZSH_CACHE_DIR/zcompdump"
+# ── Where the compdump lives ───────────────────────────────────────
+# $ZSH_COMPDUMP is deliberately NOT set here. It has to be exported in
+# 00-env.zsh, because Oh My Zsh runs compinit while module 10 loads and
+# reads the variable at that moment — assigning it here would be far too
+# late, and OMZ would already have written the dump into $HOME. The
+# reasoning is spelled out at the assignment in 00-env.zsh.
 
 # ── Completion menu behavior ───────────────────────────────────────
 zstyle ':completion:*' menu select                 # arrow-key selectable menu

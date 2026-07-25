@@ -17,7 +17,27 @@ export ZSH_CUSTOM_PLUGINS="$ZSH_PROFILE_DIR/external/plugins"
 # ── Keep zsh runtime state in the repo's cache/ (git-ignored) ──────
 export ZSH_CACHE_DIR="$ZSH_PROFILE_DIR/cache"
 export HISTFILE="$ZSH_CACHE_DIR/zsh_history"
-# The completion dump goes here too — see 40-completion.zsh.
+
+# The completion dump MUST be pointed here in THIS module, not in
+# 40-completion.zsh where the rest of the completion config lives.
+# Oh My Zsh calls compinit while module 10 is loading, and it picks the
+# dump location like this:
+#
+#     [[ -z "$ZSH_COMPDUMP" ]] && \
+#       ZSH_COMPDUMP="${ZDOTDIR:-$HOME}/.zcompdump-${SHORT_HOST}-${ZSH_VERSION}"
+#
+# Setting it at 40 is thirty modules too late: the variable is still
+# empty at 10, so OMZ writes ~/.zcompdump-<host>-<version> plus a .zwc
+# beside it — roughly 170 KB dropped straight into $HOME, which is
+# exactly what this repo exists to avoid. The late assignment then
+# overwrote the variable, so the value looked correct on inspection
+# while the files had already been written to the wrong place.
+#
+# This is also invisible when testing with `zsh -i` from an already
+# configured shell: the child inherits the exported variable and OMZ
+# takes the non-empty branch. Verify from a clean environment instead:
+#     env -i HOME="$HOME" PATH="$PATH" zsh -i -c 'echo $ZSH_COMPDUMP'
+export ZSH_COMPDUMP="$ZSH_CACHE_DIR/zcompdump"
 
 # ── Resolve real binary names for renamed tools ────────────────────
 # Debian and Ubuntu ship fd as `fdfind` and bat as `batcat`. The

@@ -135,3 +135,4 @@ _(not applicable — no services)_
 | Prompt symbols render as boxes / `?` | Terminal font is not a Nerd Font | Set the terminal font to **FiraCode Nerd Font** (installed by `install.sh`) |
 | Changes to a module have no effect | The shell caches nothing, but you are still in the old session | `exec zsh` |
 | Completions stale after installing a new tool | zcompdump cache | `rm -f zshprofile/cache/zcompdump* && exec zsh` |
+| A `~/.zcompdump` keeps reappearing in `$HOME` | Debian/Ubuntu run a bare `compinit` from `/etc/zsh/zshrc`, which is sourced *before* `~/.zshrc` and cannot see anything this repo sets | Known, harmless duplicate; `tests/test-syntax.sh` reports it as WARN. The documented opt-out is `skip_global_compinit=1`, but it must live in `~/.zshenv` and this repo installs only `~/.zshrc`. Safe to delete the file; it will be recreated |
