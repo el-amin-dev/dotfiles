@@ -271,6 +271,28 @@ fi
 # not masquerade as repo state in git status.
 rm -f "$PROFILE_DIR"/.zcompdump "$PROFILE_DIR"/.zcompdump.zwc
 
+# ── 8. Prompt footer invariants ────────────────────────────────────
+# The footer reports the previous command's exit status, so its capture
+# hook has to observe $? before anything else touches it. Oh My Zsh,
+# Spaceship and zsh-autosuggestions all register precmd hooks earlier
+# (module 10), and any of them running first resets $? to 0 — the
+# failure would be silent and total: every command would look
+# successful.
+section "8. Prompt footer (previous-command reporting)"
+first_hook="$(ZDOTDIR="$PROFILE_DIR" zsh -i -c 'print -r -- ${precmd_functions[1]}' 2>/dev/null)"
+if [[ "$first_hook" == "_prompt_capture" ]]; then
+  pass "_prompt_capture runs first in precmd_functions"
+else
+  fail "precmd_functions starts with '$first_hook', not _prompt_capture — \$? is clobbered before the footer reads it"
+fi
+
+# A width of 0 (no tty) must fall back rather than render an empty rule.
+if ZDOTDIR="$PROFILE_DIR" zsh -i -c 'COLUMNS=0; _prompt_footer' 2>/dev/null | grep -q '─'; then
+  pass "separator still renders when COLUMNS is 0"
+else
+  fail "separator renders empty when COLUMNS is 0 (no tty)"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────
 printf '\n────────────────────────────────────────\n'
 summary="$pass_count passed"
