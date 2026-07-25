@@ -293,6 +293,39 @@ else
   fail "separator renders empty when COLUMNS is 0 (no tty)"
 fi
 
+# ── 9. No generated artifacts tracked in git ───────────────────────
+# A completion dump was once committed by a `git add -A` because
+# nothing ignored it. Generated state is reproducible by definition and
+# does not belong in history; ignoring it is not enough if it is already
+# tracked, since gitignore does not apply to tracked files.
+section "9. Repository hygiene"
+if command -v git >/dev/null 2>&1 && git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  # .gitkeep is deliberate: it preserves the directory skeleton through a
+  # fresh clone, which is why cache/ and external/ are ignored by content
+  # rather than by negation rules.
+  tracked_junk="$(git -C "$REPO_DIR" ls-files \
+    | grep -vE '(^|/)\.gitkeep$' \
+    | grep -E '(^|/)\.?zcompdump|\.zwc$|(^|/)zsh_history$|(^|/)cache/' || true)"
+  if [[ -z "$tracked_junk" ]]; then
+    pass "no generated dumps, caches or history tracked"
+  else
+    fail "generated files are tracked: $(printf '%s' "$tracked_junk" | tr '\n' ' ')"
+  fi
+
+  # external/ holds cloned third-party repos with their own .git dirs;
+  # tracking them produces broken gitlinks in a fresh clone.
+  tracked_external="$(git -C "$REPO_DIR" ls-files \
+    | grep -vE '(^|/)\.gitkeep$' \
+    | grep -E '(^|/)external/(oh-my-zsh|plugins)/' || true)"
+  if [[ -z "$tracked_external" ]]; then
+    pass "cloned third-party code is not vendored"
+  else
+    fail "external clones are tracked: $(printf '%s' "$tracked_external" | head -1)"
+  fi
+else
+  pass "not a git checkout — hygiene checks skipped"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────
 printf '\n────────────────────────────────────────\n'
 summary="$pass_count passed"

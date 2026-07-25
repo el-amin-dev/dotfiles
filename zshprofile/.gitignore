@@ -31,6 +31,20 @@ local/*
 cache/*
 !cache/.gitkeep
 
+# ── Completion dumps written beside the profile ────────────────────
+# cache/* above covers the dump this config asks for ($ZSH_COMPDUMP,
+# set in modules/00-env.zsh). It does NOT cover dumps written here by
+# something that never reads that variable:
+#
+#   • Debian and Ubuntu run a bare `compinit` from /etc/zsh/zshrc, which
+#     is sourced BEFORE ~/.zshrc and so writes to ${ZDOTDIR:-$HOME}
+#   • running the test suite sets ZDOTDIR to this directory, which makes
+#     ${ZDOTDIR:-$HOME} resolve to exactly here
+#
+# One of these was committed by a `git add -A` because nothing ignored
+# it. A generated 51 KB completion dump has no business in git history.
+.zcompdump*
+
 # ── Editor / OS noise ──────────────────────────────────────────────
 *.swp
 *.swo
