@@ -160,6 +160,16 @@ manpager="$(probe MANPAGER)"
 man_bin="$(printf '%s' "$manpager" | sed -n 's/.*| *\([^ ]*\).*/\1/p')"
 check_cmd_in "MANPAGER" "$manpager" "$man_bin"
 
+# fzf --preview strings are the third alias-free context named by ADR-003
+# and the easiest to overlook, since they live in 70-functions.zsh rather
+# than alongside the other exports. They are ordinary shell variables,
+# not exported, so a full interactive load is needed and there is no
+# inheritance to mask the result.
+for pv in _fzf_file_preview _fzf_pipe_preview; do
+  val="$(ZDOTDIR="$PROFILE_DIR" zsh -i -c "printf '%s' \"\${$pv}\"" 2>/dev/null)"
+  check_cmd_in "$pv" "$val" "${val%% *}"
+done
+
 # ── 5. Standard tools are not shadowed (ADR-002) ───────────────────
 # A standard tool may be aliased only ADDITIVELY: the alias must still
 # invoke that same binary. Pointing it at a different tool (grep→rg,

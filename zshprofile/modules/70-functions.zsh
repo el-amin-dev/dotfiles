@@ -11,7 +11,14 @@ mkcd() {
 }
 
 # ── extract: unpack almost any archive by extension ────────────────
-# (OMZ 'extract' plugin also exists; this is a self-contained backup.)
+# Defined ONLY as a fallback. The Oh My Zsh `extract` plugin is loaded in
+# 10-omz.zsh and handles far more formats, and it extracts into a
+# subdirectory rather than spraying files into $PWD. Because this module
+# loads at 70, an unconditional definition here would silently replace
+# the better implementation with this weaker one — which is what it was
+# doing. The guard keeps this as a genuine backup for a machine where the
+# plugin is unavailable.
+if (( ! $+functions[extract] )); then
 extract() {
   [[ -f "$1" ]] || { print "extract: '$1' is not a file"; return 1; }
   case "$1" in
@@ -27,6 +34,7 @@ extract() {
     *) print "extract: don't know how to handle '$1'"; return 1 ;;
   esac
 }
+fi
 
 # ── keytest: print the raw escape sequence of a key ────────────────
 # Promised in 50-keybindings. Run it, press a key, get the code to bind.
@@ -42,7 +50,22 @@ mkbak() {
 }
 
 # ── ports: what's listening, readable ──────────────────────────────
-ports() { sudo lsof -i -P -n | rg LISTEN 2>/dev/null || sudo ss -tulpn; }
+# ss is tried first: it is part of iproute2 and present on every modern
+# Linux, whereas lsof frequently is not. rg is only used when installed,
+# so this does not become another undeclared dependency.
+ports() {
+  if (( $+commands[ss] )); then
+    sudo ss -tulpn
+  elif (( $+commands[lsof] )); then
+    if (( $+commands[rg] )); then
+      sudo lsof -i -P -n | rg LISTEN
+    else
+      sudo lsof -i -P -n | grep LISTEN
+    fi
+  else
+    print "ports: neither ss nor lsof is installed"; return 1
+  fi
+}
 
 # ── srv: instant static HTTP server in cwd (FastAPI/Svelte testing) ─
 srv() { local p="${1:-8000}"; print "serving $PWD on :$p"; python3 -m http.server "$p"; }
@@ -52,22 +75,41 @@ srv() { local p="${1:-8000}"; print "serving $PWD on :$p"; python3 -m http.serve
 #  All guarded: no fzf → function still defined but warns cleanly.
 # ════════════════════════════════════════════════════════════════════
 _need_fzf() { (( $+commands[fzf] )) || { print "fzf not installed"; return 1; }; }
+_need_fd()  { [[ -n "$ZSH_FD_BIN" ]] || { print "fd not installed"; return 1; }; }
 
-# ── fcd: fuzzy-cd into any subdirectory (bat-less, dir preview) ────
+# ── Preview commands for the pickers below ─────────────────────────
+# These strings are handed to fzf, which runs them through `sh`. That
+# shell has none of this config's aliases, so a literal `bat` here is
+# broken on Debian and Ubuntu where the binary is `batcat` — the preview
+# pane just renders empty, with no error to explain why. $ZSH_BAT_BIN
+# holds the name that actually exists (00-env.zsh, ADR-003).
+#
+# Built once at load rather than inline, so every picker previews
+# identically and there is a single place to change it.
+if [[ -n "$ZSH_BAT_BIN" ]]; then
+  _fzf_file_preview="$ZSH_BAT_BIN --style=numbers --color=always --line-range :200 {}"
+  _fzf_pipe_preview="$ZSH_BAT_BIN --color=always"
+else
+  # No bat: cat still previews the file, just without syntax colour.
+  _fzf_file_preview='cat {}'
+  _fzf_pipe_preview='cat'
+fi
+
+# ── fcd: fuzzy-cd into any subdirectory (directory-tree preview) ───
 fcd() {
-  _need_fzf || return
+  _need_fzf || return; _need_fd || return
   local dir
-  dir=$(fd --type d --hidden --exclude .git 2>/dev/null \
+  dir=$("$ZSH_FD_BIN" --type d --hidden --exclude .git 2>/dev/null \
         | fzf --preview 'eza --tree --level=1 --color=always {} 2>/dev/null') \
         && cd -- "$dir"
 }
 
 # ── fe: fuzzy-find a file and open in $EDITOR (bat preview) ─────────
 fe() {
-  _need_fzf || return
+  _need_fzf || return; _need_fd || return
   local file
-  file=$(fd --type f --hidden --exclude .git 2>/dev/null \
-        | fzf --preview 'bat --style=numbers --color=always --line-range :200 {} 2>/dev/null') \
+  file=$("$ZSH_FD_BIN" --type f --hidden --exclude .git 2>/dev/null \
+        | fzf --preview "$_fzf_file_preview") \
         && ${EDITOR:-vim} "$file"
 }
 
@@ -95,7 +137,7 @@ fco() {
   git rev-parse --is-inside-work-tree &>/dev/null || { print "not a git repo"; return 1; }
   local commit
   commit=$(git log --oneline --color=always \
-        | fzf --ansi --preview 'git show --color=always {1} | bat --color=always 2>/dev/null' \
+        | fzf --ansi --preview "git show --color=always {1} | $_fzf_pipe_preview 2>/dev/null" \
         | awk '{print $1}') \
         && git checkout "$commit"
 }
