@@ -63,25 +63,65 @@ fi
 # dropped if the prompt framework rebuilds $chpwd_functions afterwards
 # (ADR-004).
 section "3. Load order"
-order="$(ZDOTDIR="$PROFILE_DIR" zsh -i -c \
-  'print -l "$ZSH_PROFILE_DIR"/modules/[0-9]*.zsh(N:t)' 2>/dev/null)"
-if [[ "$order" == "$(printf '%s\n' "$order" | sort)" ]]; then
-  pass "modules glob in numeric order"
+
+# Ask zsh for the exact list the loader in .zshrc will iterate over,
+# rather than re-deriving it here — otherwise this only tests that a
+# sorted list is sorted, which can never fail.
+mapfile -t order < <(
+  env -i HOME="$HOME" PATH="$PATH" TERM="${TERM:-xterm}" zsh -c \
+    "print -l '$PROFILE_DIR'/modules/[0-9]*.zsh(N:t)" 2>/dev/null
+)
+
+index_of() {  # echo the position of the module matching $1, or -1
+  local pattern="$1" i=0
+  for m in "${order[@]}"; do
+    [[ "$m" == $pattern ]] && { printf '%s' "$i"; return 0; }
+    i=$((i + 1))
+  done
+  printf '%s' -1
+}
+
+if (( ${#order[@]} == 0 )); then
+  fail "loader glob matched no modules at all"
 else
-  fail "module load order is not sorted numerically"
+  pass "loader sees ${#order[@]} modules"
 fi
-if [[ -r "$PROFILE_DIR/modules/95-zoxide.zsh" ]]; then
-  pass "zoxide lives in a 95-* module (loads after the 90 prompt)"
+
+# The rule from ADR-004: zoxide appends a chpwd hook, and a prompt
+# framework that rebuilds $chpwd_functions afterwards silently drops it.
+# zoxide must therefore be sourced after the prompt.
+zoxide_at="$(index_of '*zoxide*')"
+prompt_at="$(index_of '9[0-4]-*')"
+if (( zoxide_at < 0 )); then
+  fail "no zoxide module found in the load order"
+elif (( prompt_at < 0 )); then
+  pass "zoxide at position $zoxide_at (no prompt module to order against)"
+elif (( zoxide_at > prompt_at )); then
+  pass "zoxide (${order[$zoxide_at]}) loads after the prompt (${order[$prompt_at]})"
 else
-  fail "zoxide module missing from modules/95-zoxide.zsh"
+  fail "zoxide (${order[$zoxide_at]}) loads BEFORE the prompt (${order[$prompt_at]}) — its chpwd hook will be dropped (ADR-004)"
 fi
 
 # ── 4. sh-executed integrations reference a real binary (ADR-003) ──
 # These are run by `sh`, NOT by the interactive shell, so they cannot
 # use aliases. On Debian/Ubuntu the binaries are fdfind and batcat.
 section "4. Alias-free integrations resolve to real binaries"
+
+# Probe from an EMPTY environment, sourcing only 00-env.zsh.
+#
+# Spawning `zsh -i` from the current shell would inherit its exported
+# variables, and 00-env.zsh sets MANPAGER and the FZF_* commands
+# *conditionally* — only when the corresponding tool was found. An
+# inherited value would therefore satisfy these assertions even if the
+# module had skipped them entirely, which is precisely the failure this
+# section exists to catch. (ZSH_FD_BIN and ZSH_BAT_BIN are assigned
+# unconditionally and would not mask, but there is no reason to keep two
+# probing strategies.)
 probe() {
-  ZDOTDIR="$PROFILE_DIR" zsh -i -c "printf '%s' \"\${$1}\"" 2>/dev/null
+  env -i HOME="$HOME" PATH="$PATH" TERM="${TERM:-xterm}" \
+    zsh -c "export ZSH_PROFILE_DIR='$PROFILE_DIR'
+            source '$PROFILE_DIR/modules/00-env.zsh'
+            printf '%s' \"\${$1}\"" 2>/dev/null
 }
 
 for var in ZSH_FD_BIN ZSH_BAT_BIN; do
@@ -102,7 +142,7 @@ check_cmd_in() {
     pass "$label unset (dependency absent — correctly skipped)"
   elif [[ -z "$binary" ]]; then
     fail "$label is set but names no binary: $value"
-  elif sh -c "command -v $binary" >/dev/null 2>&1; then
+  elif sh -c 'command -v -- "$1"' _ "$binary" >/dev/null 2>&1; then
     pass "$label uses '$binary', which sh can execute"
   else
     fail "$label references '$binary', which sh cannot find (alias-only name?)"
@@ -179,16 +219,10 @@ fi
 # takes its "already set" branch and the bug disappears — which is
 # exactly how a 170 KB compdump ended up in $HOME unnoticed.
 section "7. \$HOME stays clean (probed from a clean environment)"
-clean_probe() {
-  env -i HOME="$HOME" PATH="$PATH" TERM="${TERM:-xterm}" \
-    zsh -c "export ZSH_PROFILE_DIR='$PROFILE_DIR'
-            source '$PROFILE_DIR/modules/00-env.zsh'
-            print -r -- \"\${$1}\"" 2>/dev/null
-}
 
 # compinit runs inside module 10, so anything it needs must be exported
-# by module 00 — checked before Oh My Zsh has had a chance to load.
-compdump="$(clean_probe ZSH_COMPDUMP)"
+# by module 00 — probe() checks the state before Oh My Zsh can load.
+compdump="$(probe ZSH_COMPDUMP)"
 if [[ -z "$compdump" ]]; then
   fail "ZSH_COMPDUMP unset before OMZ loads — compinit will dump into \$HOME"
 elif [[ "$compdump" == "$PROFILE_DIR"/cache/* ]]; then
@@ -197,7 +231,7 @@ else
   fail "ZSH_COMPDUMP points outside cache/: $compdump"
 fi
 
-histfile="$(clean_probe HISTFILE)"
+histfile="$(probe HISTFILE)"
 if [[ "$histfile" == "$PROFILE_DIR"/cache/* ]]; then
   pass "HISTFILE points into cache/"
 else
