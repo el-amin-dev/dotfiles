@@ -42,22 +42,37 @@ DISABLE_UNTRACKED_FILES_DIRTY="true"    # faster git status in huge repos
 COMPLETION_WAITING_DOTS="true"          # visual feedback on slow completions
 
 # ── Plugin list ────────────────────────────────────────────────────
-# Order matters for two: autosuggestions before syntax-highlighting,
-# and syntax-highlighting should be LAST (it wraps the ZLE widgets).
+# Order matters for two entries: autosuggestions must come before
+# syntax-highlighting, and syntax-highlighting must be LAST because it
+# wraps the ZLE widgets every other plugin has already registered.
 plugins=(
-  git                       # tons of git aliases + branch helpers
+  git                       # git aliases + branch helpers
+  sudo                      # press Esc twice to prefix the line with sudo
   docker                    # docker completion + aliases
   docker-compose            # compose completion
-  kubectl                   # k8s completion + 'k' alias base
-  aws                       # awscli completion (you use AWS only)
+  kubectl                   # kubectl completion
+  aws                       # AWS CLI completion + profile helpers
   gh                        # GitHub CLI completion
   fzf                       # fzf keybindings + completion
-  command-not-found         # suggests apt package for missing cmd
-  colored-man-pages         # color man pages (pairs with bat MANPAGER)
-  extract                   # 'extract' any archive type
-  zsh-autosuggestions       # fish-style history suggestions  (cloned)
-  zsh-syntax-highlighting   # command syntax coloring — MUST be last (cloned)
+  command-not-found         # suggest the package providing a missing command
+  extract                   # `extract` handles any archive format
+  zsh-autosuggestions       # history-based inline suggestions  (cloned)
+  zsh-syntax-highlighting   # command syntax colouring — MUST be last (cloned)
 )
+
+# ── Deliberately NOT loaded ────────────────────────────────────────
+#   colored-man-pages   Redundant here, and not free. It exports a set
+#                       of LESS_TERMCAP_* variables and wraps `man` in a
+#                       function that re-executes it through `env` with
+#                       PAGER forced to less. Man pages in this config
+#                       are already rendered by bat via $MANPAGER
+#                       (00-env.zsh), which takes precedence over PAGER
+#                       — so the termcap colours are never used and the
+#                       wrapper adds a subprocess for no benefit.
+#
+#   sudo (note)         Loaded above specifically because NO_BANG_HIST
+#                       is set in 20-options.zsh, which disables `!!`.
+#                       Esc-Esc replaces the `sudo !!` reflex.
 
 # ── Load Oh My Zsh ─────────────────────────────────────────────────
 source "$ZSH/oh-my-zsh.sh"
