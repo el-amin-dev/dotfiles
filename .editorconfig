@@ -11,5 +11,14 @@ indent_size = 4
 [*.{js,ts,jsx,tsx,svelte,vue,json,yml,yaml,md,html,css}]
 indent_size = 2
 
+# Shell sources in this repo are written with a 2-space indent, and the
+# zsh modules rely on aligned trailing comments for readability. Without
+# this block the 4-space default above would silently reindent them.
+[*.{sh,bash,zsh,conf}]
+indent_size = 2
+
+[.zshrc]
+indent_size = 2
+
 [Makefile]
 indent_style = tab
