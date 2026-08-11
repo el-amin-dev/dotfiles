@@ -19,6 +19,11 @@
 #      --trim       strip trailing whitespace from each row
 #      --width N    print nothing and exit 1 if wider than N columns;
 #                   lets a caller lay out a banner without measuring
+#      --rainbow    a random 256-colour hue per LETTER, re-rolled each
+#                   run. Hues too close to the terminal background are
+#                   excluded, so nothing comes out invisible
+#      --bg MODE    dark | light — which end of the range to avoid.
+#                   Guessed from $COLORFGBG when not given
 #      -h, --help   this text
 #
 #  Unsupported characters render as a blank space rather than failing,
@@ -79,14 +84,16 @@ FONT[:]="  |█ |  |█ |  "
 FONT['/']="   █|  █ | █  |█   |    "
 FONT['@']=" ██ |█  █|█ ██|█   | ███"
 
-local block='█' gap=2 trim=0 maxw=0 input=''
+local block='█' gap=2 trim=0 maxw=0 input='' rainbow=0 bgmode=''
 
 while (( $# )); do
   case $1 in
-    --char)  shift; block=${1:-█} ;;
-    --gap)   shift; gap=${1:-2} ;;
-    --trim)  trim=1 ;;
-    --width) shift; maxw=${1:-0} ;;
+    --char)    shift; block=${1:-█} ;;
+    --gap)     shift; gap=${1:-2} ;;
+    --trim)    trim=1 ;;
+    --width)   shift; maxw=${1:-0} ;;
+    --rainbow) rainbow=1 ;;
+    --bg)      shift; bgmode=${1:-} ;;
     -h|--help)
       # Print the header block above, minus the comment markers.
       local l
@@ -114,32 +121,96 @@ fi
 
 input=${(U)input}
 
-local -a rows
-rows=('' '' '' '' '')
+# ── Random per-letter colour ───────────────────────────────────────
+# --rainbow is an explicit request, so it is honoured even when stdout
+# is a pipe: callers such as my-computer capture the banner with $(...)
+# and print it to a terminal themselves, and a tty check here would
+# silently strip the colour they asked for. Width is measured on the
+# uncoloured rows below, so the escapes cannot distort the layout.
+# $NO_COLOR still wins, because that is a user-level opt-out.
+(( rainbow )) && [[ -n ${NO_COLOR:-} ]] && rainbow=0
 
-local i ch glyph line r
+local -a palette
+if (( rainbow )); then
+  # Which end of the brightness range to avoid. $COLORFGBG is "fg;bg",
+  # so a low background number means a dark terminal. Absent, assume
+  # dark: it is far and away the common case, and guessing dark only
+  # risks a slightly pale letter, while guessing light wrongly can make
+  # one invisible.
+  if [[ -z $bgmode ]]; then
+    bgmode=dark
+    if [[ -n ${COLORFGBG:-} ]]; then
+      local bgidx=${COLORFGBG##*;}
+      [[ $bgidx == <-> ]] && (( bgidx >= 7 )) && bgmode=light
+    fi
+  fi
+
+  # Walk the 6×6×6 colour cube (indices 16–231) and keep only the hues
+  # that will actually stand out. Luminance uses the usual perceptual
+  # weights, since raw RGB distance would let saturated blues through
+  # on a dark background even though they read as almost black.
+  # Assigned, not merely declared: `local r` for a parameter that is
+  # already set makes zsh PRINT "r=5" to stdout, which would land in
+  # the middle of the banner. The same applies to the declaration
+  # further down that re-uses r as the row counter.
+  local r='' g='' b='' idx='' lum=''
+  for r in {0..5}; do for g in {0..5}; do for b in {0..5}; do
+    idx=$(( 16 + 36 * r + 6 * g + b ))
+    lum=$(( (299 * r * 51 + 587 * g * 51 + 114 * b * 51) / 1000 ))
+    if [[ $bgmode == dark ]]; then
+      (( lum >= 90 )) && palette+=( $idx )
+    else
+      (( lum <= 140 )) && palette+=( $idx )
+    fi
+  done; done; done
+  (( ${#palette} == 0 )) && rainbow=0
+fi
+
+# rows_plain carries the same text without escapes: every width check
+# below has to measure columns, and colour codes occupy none.
+local -a rows rows_plain
+rows=('' '' '' '' '')
+rows_plain=('' '' '' '' '')
+
+# Assigned, not bare: `local r` when r already holds the palette loop's
+# last value makes zsh echo "r=5" onto stdout, straight into the banner.
+local i='' ch='' glyph='' line='' r=''
 local -a lines
 # Gap spaces, built by left-padding an empty string. The parameter has
 # to be NAMED: `${(l:n:: :)}` with nothing to expand trips `no_unset`.
 local _empty=''
 local spacer="${(l:$gap:: :)_empty}"
 
+local colour=''
 for (( i = 1; i <= ${#input}; i++ )); do
   ch=${input[i]}
   glyph=${FONT[$ch]:-${FONT[' ']}}
   lines=("${(@s:|:)glyph}")
+  # One hue per LETTER, chosen once here so all five of its rows match.
+  # Rolling per row would shred each glyph into horizontal stripes.
+  if (( rainbow )); then
+    colour=$'\033[38;5;'${palette[ RANDOM % ${#palette} + 1 ]}$'m'
+  fi
   for r in {1..5}; do
     line=${lines[r]//./ }            # spacer dots become spaces
     [[ $block != '█' ]] && line=${line//█/$block}
-    rows[r]+="${line}${spacer}"
+    rows_plain[r]+="${line}${spacer}"
+    if (( rainbow )); then
+      # Reset before the gap, so the trailing spaces stay plain and
+      # trimming them below cannot cut into an escape sequence.
+      rows[r]+="${colour}${line}"$'\033[0m'"${spacer}"
+    else
+      rows[r]+="${line}${spacer}"
+    fi
   done
 done
 
 # Refuse rather than wrap: a banner that wraps is worse than no banner,
-# and the caller cannot know the rendered width without asking.
+# and the caller cannot know the rendered width without asking. Measured
+# on the plain rows, since escapes take no columns.
 if (( maxw > 0 )); then
   local widest=0
-  for r in {1..5}; do (( ${#rows[r]} > widest )) && widest=${#rows[r]}; done
+  for r in {1..5}; do (( ${#rows_plain[r]} > widest )) && widest=${#rows_plain[r]}; done
   (( widest > maxw )) && return 1
 fi
 

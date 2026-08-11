@@ -456,6 +456,59 @@ if [[ -x "$asc" ]]; then
   else
     fail "asciify failed on unsupported characters"
   fi
+
+  # --rainbow must colour, must vary between runs, and must never leak a
+  # stray variable echo into the art. zsh prints "r=5" when `local r`
+  # re-declares a parameter that already holds a value, and that landed
+  # in the middle of the banner.
+  rb="$(timeout 20 "$asc" --rainbow --trim "AB" </dev/null 2>/dev/null)"
+  if printf '%s' "$rb" | grep -q $'\033\[38;5;'; then
+    pass "asciify --rainbow emits 256-colour codes"
+  else
+    fail "asciify --rainbow produced no colour"
+  fi
+  if printf '%s' "$rb" | grep -qE '^[a-z_]+=' ; then
+    fail "asciify leaked a variable assignment into its output"
+  else
+    pass "asciify emits no stray variable echoes"
+  fi
+  hues1="$(timeout 20 "$asc" --rainbow "ABCDEFGH" </dev/null 2>/dev/null | grep -o '38;5;[0-9]*' | sort -u | tr -d '\n')"
+  hues2="$(timeout 20 "$asc" --rainbow "ABCDEFGH" </dev/null 2>/dev/null | grep -o '38;5;[0-9]*' | sort -u | tr -d '\n')"
+  if [[ "$hues1" != "$hues2" ]]; then
+    pass "asciify --rainbow re-rolls colours each run"
+  else
+    fail "asciify --rainbow produced identical colours twice"
+  fi
+  # Excluded hues are the point: a letter the colour of the background
+  # is worse than no colour at all.
+  if timeout 20 "$asc" --rainbow --bg dark "ABCDEFGHIJ" </dev/null 2>/dev/null \
+       | grep -oE '38;5;(1[6-9]|2[0-9]|3[0-4])\b' | grep -q .; then
+    fail "asciify --rainbow used near-black hues on a dark background"
+  else
+    pass "asciify --rainbow avoids hues close to the background"
+  fi
+  if [[ -z "$(NO_COLOR=1 timeout 20 "$asc" --rainbow "AB" </dev/null 2>/dev/null | grep -o $'\033')" ]]; then
+    pass "asciify --rainbow honours NO_COLOR"
+  else
+    fail "asciify --rainbow ignored NO_COLOR"
+  fi
+fi
+
+# The layout is the feature: it must genuinely reflow, not just survive.
+if [[ -x "$mc" ]]; then
+  for spec in "50:1" "76:2" "118:3"; do
+    wid="${spec%%:*}"; want="${spec#*:}"
+    # Count panel top-borders on the busiest row to infer the columns.
+    got="$(timeout 25 "$mc" --width "$wid" --no-banner --no-color </dev/null 2>/dev/null \
+           | grep -c '^  ╭' || true)"
+    rowmax="$(timeout 25 "$mc" --width "$wid" --no-banner --no-color </dev/null 2>/dev/null \
+           | grep '╭' | awk '{n=gsub(/╭/,"x"); if (n>m) m=n} END {print m+0}')"
+    if [[ "$rowmax" == "$want" ]]; then
+      pass "width $wid lays out $want column(s)"
+    else
+      fail "width $wid produced $rowmax columns, expected $want"
+    fi
+  done
 fi
 
 # ── Summary ────────────────────────────────────────────────────────
