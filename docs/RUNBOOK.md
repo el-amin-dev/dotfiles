@@ -50,6 +50,23 @@ my-computer --banner HELLO     # render different banner text
 my-computer --width 80         # override the auto-detected width
 my-computer --help
 
+my-computer -l                 # flat "key   value" list — no frame, for piping
+my-computer --list --all       # same, verbose
+```
+
+`-l` / `--list` emits one `key   value` per line with no frame, banner, meters or section
+headings, and never emits colour — even on a terminal — so values stay parseable.
+
+**Parsing contract:** key and value are separated by **two or more spaces**, and neither contains a
+run of two or more spaces. A single-space rule would break on mount points, which *are* keys and can
+contain spaces (a drive labelled `UBUNTU 26_0` mounts at a path with one).
+
+```bash
+my-computer -l | grep '^Kernel'
+my-computer -l | awk -F'  +' '$1=="RAM" { print $2 }'
+my-computer -l | sed 's/  \+/\t/'          # convert to TSV
+diff <(my-computer -l) <(ssh box my-computer -l)
+
 asciify "HELLO"                # block-letter art, pure zsh
 echo HI | asciify --trim       # reads stdin too
 asciify --char '#' "ASCII"     # ASCII-safe glyph
