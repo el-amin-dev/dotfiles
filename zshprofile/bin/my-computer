@@ -186,8 +186,28 @@ LW=10                             # label column inside a panel
 (( BOXW >= 44 )) && LW=12
 
 # ── Builtin-only helpers ───────────────────────────────────────────
-rep()   { local c=$1 n=$2 s=''; while (( n-- > 0 )); do s+="$c"; done; printf '%s' "$s"; }
-slurp() { local l; [[ -r "$1" ]] && IFS= read -r l < "$1" 2>/dev/null && printf '%s' "$l"; }
+# ── Fork-free string helpers ───────────────────────────────────────
+# The rendering loop runs these thousands of times, and in bash every
+# $(...) forks a subshell. Building the report through command
+# substitution cost 481 processes per run; these write to $REPLY
+# instead, so the hot path forks nothing at all.
+#
+# The _v suffix marks "returns via REPLY". Call sites read $REPLY
+# immediately, before anything else can overwrite it.
+
+# Repeat a character. printf pads in one call rather than looping once
+# per column, which matters at four panels wide.
+rep_v() {
+  local n=$2
+  if (( n <= 0 )); then REPLY=''; return; fi
+  printf -v REPLY '%*s' "$n" ''
+  [[ $1 == ' ' ]] || REPLY="${REPLY// /$1}"
+}
+rep() { rep_v "$1" "$2"; printf '%s' "$REPLY"; }
+# Reading /sys is the other fork storm: a single run touches over a
+# hundred of these files, and $(slurp …) forked once per file.
+slurp_v() { REPLY=''; [[ -r "$1" ]] && IFS= read -r REPLY < "$1" 2>/dev/null; return 0; }
+slurp() { slurp_v "$1"; printf '%s' "$REPLY"; }
 cmd1()  { local o; o="$("$@" 2>/dev/null)" || return; printf '%s' "${o%%$'\n'*}"; }
 sysctl_n() { have sysctl && cmd1 sysctl -n "$1"; }
 rtrim() { local s=$1; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
@@ -204,18 +224,25 @@ unescape_mount() {
 
 # Visible length: colour codes occupy no columns, so every width
 # calculation has to measure the text with them removed.
-strip_ansi() { local s=$1; printf '%s' "${s//$'\033'\[*([0-9;])m/}"; }
-vlen() { local s; s="$(strip_ansi "$1")"; printf '%d' "${#s}"; }
+strip_v() { REPLY="${1//$'\033'\[*([0-9;])m/}"; }
+vlen_v()  { strip_v "$1"; REPLY=${#REPLY}; }
 
 # Truncate to a visible width. Colour is dropped when the text actually
 # has to be cut — keeping it would mean splitting an escape sequence.
-vfit() {
-  local s=$1 want=$2 plain
-  plain="$(strip_ansi "$s")"
-  if (( ${#plain} <= want )); then printf '%s' "$s"; return; fi
-  (( want <= 1 )) && { printf '%s' "${plain:0:want}"; return; }
-  printf '%s%s' "${plain:0:$(( want - 1 ))}" "${unicode:+…}"
+vfit_v() {
+  local s=$1 want=$2
+  strip_v "$s"
+  local plain=$REPLY
+  if (( ${#plain} <= want )); then REPLY=$s; return; fi
+  if (( want <= 1 )); then REPLY="${plain:0:want}"; return; fi
+  REPLY="${plain:0:$(( want - 1 ))}${unicode:+…}"
 }
+
+# Echoing wrappers, kept for the handful of cold call sites where
+# readability beats the fork.
+strip_ansi() { strip_v "$1"; printf '%s' "$REPLY"; }
+vlen() { vlen_v "$1"; printf '%d' "$REPLY"; }
+vfit() { vfit_v "$1" "$2"; printf '%s' "$REPLY"; }
 
 hkib() {
   local k=$1
@@ -245,13 +272,14 @@ hsecs() {
   printf '%s' "$o"
 }
 
-sev() {
+sev_v() {
   local p=$1
-  if   (( p >= 90 )); then printf '%s' "$RED"
-  elif (( p >= 75 )); then printf '%s' "$YEL"
-  else                     printf '%s' "$GRN"
+  if   (( p >= 90 )); then REPLY=$RED
+  elif (( p >= 75 )); then REPLY=$YEL
+  else                     REPLY=$GRN
   fi
 }
+sev() { sev_v "$1"; printf '%s' "$REPLY"; }
 
 # ════════════════════════════════════════════════════════════════════
 #  Panels
@@ -290,10 +318,12 @@ panel_meter() {
   local filled=$(( pct * barw / 100 ))
   (( filled == 0 && pct > 0 )) && filled=1
   (( filled == barw && pct < 100 )) && filled=$(( barw - 1 ))
-  local bar
-  bar="$(sev "$pct")$(rep "$G_FULL" $filled)$R$D$(rep "$G_EMPTY" $(( barw - filled )))$R"
-  local head
-  head="$bar $(sev "$pct")$(printf '%3d%%' "$pct")$R"
+  sev_v "$pct"; local colour=$REPLY
+  rep_v "$G_FULL" "$filled"; local on=$REPLY
+  rep_v "$G_EMPTY" $(( barw - filled )); local off=$REPLY
+  local head pctxt
+  printf -v pctxt '%3d%%' "$pct"
+  head="${colour}${on}${R}${D}${off}${R} ${colour}${pctxt}${R}"
   if (( avail - barw - 5 >= ${#detail} + 2 )); then
     panel_row "$label" "$head  ${D}${detail}${R}"
   else
@@ -303,36 +333,40 @@ panel_meter() {
 }
 
 panel_end() {
-  local w=$_pw inner=$(( _pw - 2 )) out='' t=" $_ptitle " fill row label value line
+  local inner=$(( _pw - 2 )) out='' t=" $_ptitle " fill row label value line pad
   fill=$(( inner - 1 - ${#t} ))
   (( fill < 0 )) && fill=0
-  out="${ACC}${G_TL}${G_H}${B}${t}${R}${ACC}$(rep "$G_H" $fill)${G_TR}${R}"
+  rep_v "$G_H" "$fill"
+  out="${ACC}${G_TL}${G_H}${B}${t}${R}${ACC}${REPLY}${G_TR}${R}"
+
+  rep_v "$G_H" "$inner"; local rule=$REPLY
+  rep_v ' ' "$LW";       local labelpad=$REPLY
 
   for row in "${_prows[@]}"; do
     if [[ "$row" == $'\x1e' ]]; then
-      out+=$'\n'"${ACC}${G_ML}${D}$(rep "$G_H" $inner)${R}${ACC}${G_MR}${R}"
+      out+=$'\n'"${ACC}${G_ML}${D}${rule}${R}${ACC}${G_MR}${R}"
       continue
     fi
     if [[ "$row" == $'\x1d'* ]]; then
-      value="$(vfit "${row#$'\x1d'}" $(( inner - 4 )))"
+      vfit_v "${row#$'\x1d'}" $(( inner - 4 )); value=$REPLY
       line="  ${value}"
-      out+=$'\n'"${ACC}${G_V}${R}${line}$(rep ' ' $(( inner - $(vlen "$line") )))${ACC}${G_V}${R}"
-      continue
-    fi
-    label="${row%%$'\x1f'*}"; value="${row#*$'\x1f'}"
-    if [[ -n "$label" ]]; then
-      value="$(vfit "$value" $(( inner - 3 - LW )))"
-      line="  ${D}$(printf '%-*s' "$LW" "$label")${R} ${value}"
     else
-      # Continuation / free text: indent past the label column so it
-      # reads as belonging to the row above.
-      value="$(vfit "$value" $(( inner - 3 - LW )))"
-      line="  $(rep ' ' $LW) ${value}"
+      label="${row%%$'\x1f'*}"; value="${row#*$'\x1f'}"
+      vfit_v "$value" $(( inner - 3 - LW )); value=$REPLY
+      if [[ -n "$label" ]]; then
+        printf -v line '  %s%-*s%s %s' "$D" "$LW" "$label" "$R" "$value"
+      else
+        # Continuation: indent past the label column so it reads as
+        # belonging to the row above.
+        line="  ${labelpad} ${value}"
+      fi
     fi
-    out+=$'\n'"${ACC}${G_V}${R}${line}$(rep ' ' $(( inner - $(vlen "$line") )))${ACC}${G_V}${R}"
+    vlen_v "$line"
+    rep_v ' ' $(( inner - REPLY )); pad=$REPLY
+    out+=$'\n'"${ACC}${G_V}${R}${line}${pad}${ACC}${G_V}${R}"
   done
 
-  out+=$'\n'"${ACC}${G_BL}$(rep "$G_H" $inner)${G_BR}${R}"
+  out+=$'\n'"${ACC}${G_BL}${rule}${G_BR}${R}"
   PANELS+=( "$out" )
   PANEL_FULL+=( "$_pfull" )
 }
@@ -366,7 +400,7 @@ collect_linux() {
       case "$k" in PRETTY_NAME) os_name="$v";; ID) brand="$v";; esac
     done < /etc/os-release
   fi
-  kernel="$(slurp /proc/sys/kernel/osrelease)"
+  slurp_v /proc/sys/kernel/osrelease; kernel=$REPLY
   read -r uptime_s _ < /proc/uptime 2>/dev/null || uptime_s=''
 
   if [[ -d /var/lib/dpkg/info ]]; then
@@ -377,12 +411,14 @@ collect_linux() {
   fi
 
   local dmi=/sys/devices/virtual/dmi/id vendor product bv bd
-  vendor="$(slurp $dmi/sys_vendor)"; product="$(slurp $dmi/product_name)"
+  slurp_v "$dmi/sys_vendor";  vendor=$REPLY
+  slurp_v "$dmi/product_name"; product=$REPLY
   machine="$product"
   [[ -n "$vendor" && "$product" != "$vendor"* ]] && machine="$vendor $product"
-  bv="$(slurp $dmi/bios_version)"; bd="$(slurp $dmi/bios_date)"
+  slurp_v "$dmi/bios_version"; bv=$REPLY
+  slurp_v "$dmi/bios_date";    bd=$REPLY
   [[ -n "$bv" ]] && bios="$bv${bd:+ ${G_SEP} $bd}"
-  chassis="$(chassis_name "$(slurp $dmi/chassis_type)")"
+  slurp_v "$dmi/chassis_type"; chassis="$(chassis_name "$REPLY")"
 
   # Physical cores are the distinct (physical id, core id) pairs — what
   # separates real cores from hyperthreads, which /proc/cpuinfo lists
@@ -402,11 +438,11 @@ collect_linux() {
   local sum=0 n=0 f k
   for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq; do
     [[ -r "$f" ]] || continue
-    k="$(slurp "$f")"; [[ -z "$k" || "$k" == *[!0-9]* ]] && continue
+    slurp_v "$f"; k=$REPLY; [[ -z "$k" || "$k" == *[!0-9]* ]] && continue
     sum=$(( sum + k )); n=$(( n + 1 ))
   done
   (( n )) && clock_mhz=$(( sum / n / 1000 ))
-  k="$(slurp /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)"
+  slurp_v /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq; k=$REPLY
   [[ -n "$k" && "$k" != *[!0-9]* ]] && clock_max_mhz=$(( k / 1000 ))
 
   local key v cached=0 buffers=0
@@ -434,17 +470,17 @@ collect_linux() {
 
   local h t z
   for h in /sys/class/hwmon/hwmon*; do
-    case "$(slurp "$h/name")" in
+    slurp_v "$h/name"; case $REPLY in
       coretemp|k10temp|zenpower|cpu_thermal)
-        t="$(slurp "$h/temp1_input")"
+        slurp_v "$h/temp1_input"; t=$REPLY
         [[ -n "$t" && "$t" != *[!0-9]* ]] && { temp_c=$(( t / 1000 )); break; } ;;
     esac
   done
   if [[ -z "$temp_c" ]]; then
     for z in /sys/class/thermal/thermal_zone*; do
-      case "$(slurp "$z/type")" in
+      slurp_v "$z/type"; case $REPLY in
         x86_pkg_temp|acpitz|cpu*)
-          t="$(slurp "$z/temp")"
+          slurp_v "$z/temp"; t=$REPLY
           [[ -n "$t" && "$t" != *[!0-9]* ]] && (( t > 0 )) && { temp_c=$(( t / 1000 )); break; } ;;
       esac
     done
@@ -453,19 +489,21 @@ collect_linux() {
   local bat a full design
   for bat in /sys/class/power_supply/BAT*; do
     [[ -d "$bat" ]] || continue
-    bat_pct="$(slurp "$bat/capacity")"
+    slurp_v "$bat/capacity"; bat_pct=$REPLY
     [[ -z "$bat_pct" || "$bat_pct" == *[!0-9]* ]] && { bat_pct=''; continue; }
-    bat_state="$(slurp "$bat/status")"
+    slurp_v "$bat/status"; bat_state=$REPLY
     # Wear: what the cell holds now against what it shipped with. This
     # is the number that explains a laptop that stopped lasting.
-    full="$(slurp "$bat/energy_full")"; design="$(slurp "$bat/energy_full_design")"
-    [[ -z "$full"   ]] && full="$(slurp "$bat/charge_full")"
-    [[ -z "$design" ]] && design="$(slurp "$bat/charge_full_design")"
+    slurp_v "$bat/energy_full";        full=$REPLY
+    slurp_v "$bat/energy_full_design"; design=$REPLY
+    [[ -z "$full"   ]] && { slurp_v "$bat/charge_full";        full=$REPLY; }
+    [[ -z "$design" ]] && { slurp_v "$bat/charge_full_design"; design=$REPLY; }
     if [[ -n "$full" && -n "$design" && "$full" != *[!0-9]* && "$design" != *[!0-9]* ]] \
        && (( design > 0 )); then bat_health=$(( full * 100 / design )); fi
     for a in /sys/class/power_supply/A{C,DP}*; do
       [[ -r "$a/online" ]] || continue
-      [[ "$(slurp "$a/online")" == 1 ]] && bat_state+=" ${G_SEP} AC" || bat_state+=" ${G_SEP} battery"
+      slurp_v "$a/online"
+      [[ $REPLY == 1 ]] && bat_state+=" ${G_SEP} AC" || bat_state+=" ${G_SEP} battery"
       break
     done
     break
@@ -565,8 +603,9 @@ collect_linux_net() {
       [[ -e "$hci" ]] && bt_conns=$(( bt_conns + 1 ))
     done
     for rk in /sys/class/rfkill/rfkill*; do
-      [[ "$(slurp "$rk/type")" == bluetooth ]] || continue
-      [[ "$(slurp "$rk/soft")" == 1 || "$(slurp "$rk/hard")" == 1 ]] && bt_blocked=1
+      slurp_v "$rk/type"; [[ $REPLY == bluetooth ]] || continue
+      slurp_v "$rk/soft"; rk_soft=$REPLY
+      slurp_v "$rk/hard"; [[ $rk_soft == 1 || $REPLY == 1 ]] && bt_blocked=1
       break
     done
   fi
@@ -575,7 +614,7 @@ collect_linux_net() {
   for ifp in /sys/class/net/*; do
     nm="${ifp##*/}"
     [[ "$nm" == lo ]] && continue
-    [[ "$(slurp "$ifp/operstate")" == up ]] || continue
+    slurp_v "$ifp/operstate"; [[ $REPLY == up ]] || continue
     nets+=( "$nm" )
   done
 }
@@ -587,17 +626,18 @@ collect_linux_disks() {
     # loop devices are snap mounts, ram/zram are memory — neither is a
     # disk anyone means when they ask what is plugged in.
     case "$n" in loop*|ram*|zram*|dm-*|sr*) continue ;; esac
-    size="$(slurp "$b/size")"
+    slurp_v "$b/size"; size=$REPLY
     [[ -z "$size" || "$size" == *[!0-9]* ]] && continue
     (( size == 0 )) && continue
-    rem="$(slurp "$b/removable")"
-    model="$(slurp "$b/device/model")"
-    vendor="$(slurp "$b/device/vendor")"
+    slurp_v "$b/removable"; rem=$REPLY
+    slurp_v "$b/device/model"; model=$REPLY
+    slurp_v "$b/device/vendor"; vendor=$REPLY
     # Trim the fixed-width padding the kernel keeps in these fields.
     model="$(rtrim "${model## }")"; vendor="$(rtrim "${vendor## }")"
     [[ -n "$vendor" && "$model" != "$vendor"* ]] && model="$vendor $model"
     [[ -z "$model" ]] && model="$n"
-    if [[ "$(slurp "$b/queue/rotational")" == 1 ]]; then kind='HDD'; else kind='SSD'; fi
+    slurp_v "$b/queue/rotational"
+    if [[ $REPLY == 1 ]]; then kind='HDD'; else kind='SSD'; fi
     # size is in 512-byte sectors, so /2 gives KiB.
     if [[ "$rem" == 1 ]]; then
       removables+=( "$n"$'\x1f'"$model"$'\x1f'"$(( size / 2 ))" )
@@ -610,7 +650,7 @@ collect_linux_disks() {
   for u in /sys/bus/usb/devices/*; do
     p="$u/product"
     [[ -r "$p" ]] || continue
-    n="$(slurp "$p")"
+    slurp_v "$p"; n=$REPLY
     # Root hubs are the machine's own controllers, not anything plugged
     # in, and listing them buries what is.
     case "$n" in *"Host Controller"*|*"root hub"*) continue ;; esac
@@ -681,7 +721,7 @@ case "$OS" in
 esac
 
 # ── Banner and identity ────────────────────────────────────────────
-host="$(slurp /proc/sys/kernel/hostname)"
+slurp_v /proc/sys/kernel/hostname; host=$REPLY
 [[ -z "$host" ]] && host="$(cmd1 uname -n)"
 [[ -z "$host" ]] && host="${HOSTNAME:-unknown}"
 user="${USER:-${LOGNAME:-$(id -un 2>/dev/null)}}"
@@ -798,7 +838,7 @@ panel_row "Kernel"   "$kernel"
 # shell. $SHELL is the fallback.
 shell_name=''
 if [[ -r "/proc/$PPID/comm" ]]; then
-  parent_cmd="$(slurp "/proc/$PPID/comm")"
+  slurp_v "/proc/$PPID/comm"; parent_cmd=$REPLY
   case "$parent_cmd" in
     zsh|bash|fish|ksh|mksh|dash|sh|tcsh|csh|elvish|nu) shell_name="$parent_cmd" ;;
   esac
@@ -875,8 +915,9 @@ if [[ "$OS" == Linux ]]; then
   [[ -n "$gpus" ]] && panel_row "GPU" "$gpus"
   modes=()
   for st in /sys/class/drm/*/status; do
-    [[ "$(slurp "$st")" == connected ]] || continue
-    m="$(slurp "${st%/status}/modes")"; [[ -n "$m" ]] && modes+=( "$m" )
+    slurp_v "$st"; [[ $REPLY == connected ]] || continue
+    slurp_v "${st%/status}/modes"; m=$REPLY
+    [[ -n "$m" ]] && modes+=( "$m" )
   done
   if (( ${#modes[@]} )); then
     disp="${modes[0]}"
@@ -1055,15 +1096,20 @@ emit_row() {
     heights+=( "$h" ); offs+=( "$acc" ); acc=$(( acc + h ))
     (( h > maxh )) && maxh=$h
   done
+  # Built once, outside the loop: these were the single biggest source
+  # of forks, recomputed for every cell of every row.
+  rep_v ' ' "$BOXW"; local blank=$REPLY
+  rep_v ' ' "$GAP";  local gap=$REPLY
+  local last=$(( ${#idx[@]} - 1 ))
   for (( r = 0; r < maxh; r++ )); do
     out='  '
-    for (( c = 0; c < ${#idx[@]}; c++ )); do
+    for (( c = 0; c <= last; c++ )); do
       if (( r < heights[c] )); then out+="${flat[ offs[c] + r ]}"
-      else                          out+="$(rep ' ' $BOXW)"
+      else                          out+="$blank"
       fi
-      (( c < ${#idx[@]} - 1 )) && out+="$(rep ' ' $GAP)"
+      (( c < last )) && out+="$gap"
     done
-    printf '%s\n' "$(rtrim "$out")"
+    printf '%s\n' "${out%"${out##*[![:space:]]}"}"
   done
 }
 

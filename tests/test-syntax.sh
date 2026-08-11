@@ -529,6 +529,24 @@ if [[ -x "$mc" ]]; then
   fi
 fi
 
+# Speed is a feature here: this runs interactively, on demand. The cost
+# is dominated by process creation, because in bash every $(...) forks a
+# subshell — building the report through command substitution once cost
+# 481 processes and half a second. The guard is on fork COUNT rather
+# than wall-clock, which swings with machine load and would make the
+# suite flaky.
+if [[ -x "$mc" ]] && command -v strace >/dev/null 2>&1; then
+  forks="$(strace -f -c -e trace=clone,clone3 "$mc" --width 200 --no-banner </dev/null 2>&1 >/dev/null \
+           | awk '/clone/ { n += $4 } END { print n+0 }')"
+  if [[ -n "$forks" ]] && (( forks > 0 )) && (( forks <= 150 )); then
+    pass "my-computer forks $forks subshells (budget 150)"
+  elif (( ${forks:-0} > 150 )); then
+    fail "my-computer forks $forks subshells — a \$(...) crept into a render loop"
+  else
+    pass "fork count not measurable here — skipped"
+  fi
+fi
+
 # The layout is the feature: it must genuinely reflow, not just survive.
 if [[ -x "$mc" ]]; then
   for spec in "50:1" "76:2" "118:3"; do
