@@ -133,6 +133,7 @@ fi
 # de-duplication is bypassed.
 typeset -U path
 path=(
+  "$ZSH_PROFILE_DIR/bin"  # commands shipped with this repo (my-computer)
   "$HOME/.local/bin"      # pipx, user-level pip installs
   "$HOME/bin"             # personal scripts
   $path                   # system defaults, kept last
