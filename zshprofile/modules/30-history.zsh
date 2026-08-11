@@ -19,8 +19,42 @@ SAVEHIST=50000          # events written to $HISTFILE
 # INC_APPEND_HISTORY_TIME appends each command once it FINISHES, which
 # also records how long it took.
 setopt INC_APPEND_HISTORY_TIME
-setopt HIST_FCNTL_LOCK         # lock the file properly when several
-                               # terminals append at the same time
+
+# ── File locking: ONLY on a local filesystem ───────────────────────
+# HIST_FCNTL_LOCK makes zsh take an fcntl() lock around history writes,
+# which is the correct way to stop several terminals corrupting the file
+# and costs nothing on a local disk.
+#
+# On a NETWORK filesystem it is a trap. fcntl() locking over NFS or SMB
+# is handled by the server's lock manager, and when that is unreachable,
+# not running, or the export disallows locking, the call BLOCKS — no
+# error, no timeout. The shell stops before it can accept a keystroke,
+# and Ctrl-C is the only escape, because interrupting the syscall is
+# precisely what Ctrl-C does. `source ~/.zshrc` hangs the same way, and
+# an interrupted prompt can leave a literal $(spaceship::rprompt) on
+# screen where the theme had not finished rendering.
+#
+# This bites exactly one class of machine: managed/corporate systems
+# with a roaming or network-mounted $HOME. Identical config, identical
+# install, one machine hangs — because the filesystem differs, which is
+# why reinstalling never helped.
+#
+# So the option is enabled only when the history file is on local
+# storage. `stat -f` costs about a millisecond, once per shell, and only
+# at startup — never per prompt.
+#
+# To force it either way, in local/local.zsh:
+#     setopt HIST_FCNTL_LOCK      # or:  unsetopt HIST_FCNTL_LOCK
+#
+# Diagnose a suspected hang with:  ./tests/diagnose-startup.sh
+if (( $+commands[stat] )); then
+  case "${$(stat -f -c %T ${HISTFILE:h} 2>/dev/null):-unknown}" in
+    # Network and userspace filesystems — locking may block. Leave off.
+    nfs*|smb*|cifs*|fuse*|afs*|9p*|glusterfs|lustre*|ceph*|unknown) ;;
+    # Local filesystems — locking is safe and wanted.
+    *) setopt HIST_FCNTL_LOCK ;;
+  esac
+fi
 
 # SHARE_HISTORY must be turned OFF *explicitly*, not merely left unset.
 # Oh My Zsh enables it in lib/history.zsh, which module 10 has already

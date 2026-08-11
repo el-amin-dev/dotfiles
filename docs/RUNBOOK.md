@@ -118,8 +118,15 @@ _(not applicable — no services)_
 
 ## Troubleshooting
 
+> **Shell hangs at startup?** Run `./tests/diagnose-startup.sh` on that machine. Every check is
+> timeouted, so the script cannot hang the way the shell does — a check that times out *is* the
+> answer, and it prints what to do about it.
+
 | Symptom | Cause | Fix |
 |---|---|---|
+| Terminal accepts no input until Ctrl-C; `source ~/.zshrc` hangs too; an interrupted prompt leaves a literal `$(spaceship::rprompt)` on screen | `HIST_FCNTL_LOCK` with `$HISTFILE` on a **network** filesystem. `fcntl()` locking over NFS/SMB blocks with no error and no timeout when the server's lock manager is unreachable. Hits managed/corporate machines with a roaming `$HOME`; reinstalling never helps because the filesystem is the variable, not the config | Already handled — `30-history.zsh` enables the lock only on local storage (ADR-006). Confirm with `./tests/diagnose-startup.sh`. To force it off by hand, put `unsetopt HIST_FCNTL_LOCK` in `local/local.zsh` |
+| Shell state lives on a network mount and everything is slow | `$HOME`/repo is network-mounted | `export ZSH_CACHE_DIR=/var/tmp/zsh-$USER` in `local/local.zsh` |
+| Prompt renders half-drawn, or stalls before accepting input | Spaceship's async worker never reports back — endpoint-security agents on managed machines can make fork/exec pathologically slow | `SPACESHIP_PROMPT_ASYNC=false` in `local/local.zsh` |
 | Phantom `✘ 1` on the first prompt of every terminal | A test or `&&` chain at the end of `.zshrc` or the last module leaked a non-zero exit status | `.zshrc` ends with a bare `true`; use an `if` block, never `[[ -r f ]] && source f`, as the last statement of a file |
 | `zoxide: detected a possible configuration issue` | zoxide's `chpwd` hook was dropped by a later module rebuilding `$chpwd_functions` | zoxide must init last — it lives in `modules/95-zoxide.zsh`, after the 90 prompt. Do **not** silence with `_ZO_DOCTOR=0` (ADR-004) |
 | `z` never jumps anywhere useful | Same as above — the database was never being written | Verify `modules/95-zoxide.zsh` loads, then rebuild usage by `cd`-ing around normally |

@@ -16,6 +16,39 @@ Entry format (use exactly this shape):
 
 <!-- append ADRs below, newest first -->
 
+## ADR-006 — History file locking is conditional on the filesystem (2026-07-25)
+- status: accepted
+- context: ADR-005 added `HIST_FCNTL_LOCK` so concurrent terminals cannot corrupt the history file.
+  That is correct and effectively free on local storage. It is a trap on a network filesystem:
+  `fcntl()` locking over NFS or SMB is serviced by the server's lock manager, and when that manager
+  is unreachable, not running, or the export disallows locking, the call **blocks with no error and
+  no timeout**. The shell then stops before it can accept a keystroke.
+  Observed on one of four otherwise identical Ubuntu machines — a managed corporate system with a
+  network-mounted home. Symptoms: the terminal took no input until Ctrl-C, `source ~/.zshrc` hung
+  the same way, and the interrupted prompt sometimes left a literal `$(spaceship::rprompt)` on
+  screen where the theme had not finished rendering. Reinstalling never helped, because the variable
+  was the filesystem, not the configuration.
+- decision: Enable `HIST_FCNTL_LOCK` only when `$HISTFILE` sits on local storage, detected with
+  `stat -f -c %T` at startup. Network and userspace filesystems (nfs, smb, cifs, fuse, afs, 9p,
+  gluster, lustre, ceph) and any type that cannot be determined leave the option off. `local/local.zsh`
+  can force it either way. `tests/diagnose-startup.sh` reproduces and confirms the failure, and the
+  suite asserts the decision matches the filesystem on whichever machine it runs.
+- alternatives:
+  - Leave it on everywhere — rejected; that is the bug, and its failure mode is a shell that will
+    not accept input, which reads as a broken machine rather than a broken setting.
+  - Remove it everywhere — rejected; it discards real protection on the three machines where
+    locking works, to accommodate one where it does not.
+  - Wrap history writes in a timeout — rejected; there is no supported way to bound the syscall from
+    inside zsh, and a partially written history file is worse than an unlocked one.
+  - Move `$HISTFILE` to local storage unconditionally — rejected as the default, since it would put
+    shell state outside the repo and break the portability the layout exists for. It stays available
+    as a documented `local/local.zsh` override for anyone who wants locking on such a machine.
+- consequences: One `stat` call (~3.5 ms) per shell startup, never per prompt. Machines with a
+  network home keep durable history via `INC_APPEND_HISTORY_TIME` but lose corruption protection
+  when several terminals write at once — an acceptable trade against a shell that hangs. The
+  detection is Linux-specific: `stat -f -c` is GNU coreutils, and on a system without it the guard
+  falls through to leaving locking off, which is the safe direction.
+
 ## ADR-005 — History is written incrementally, never shared live between terminals (2026-07-25)
 - status: accepted
 - context: With zsh's defaults, history is flushed only when a shell exits cleanly. Closing a
