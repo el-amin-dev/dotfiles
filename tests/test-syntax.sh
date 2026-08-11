@@ -638,6 +638,8 @@ if [[ -x "$mc" ]]; then
   check_value IPv4      0 '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
   check_value Gateway   0 '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
   check_value Signal    0 '^[0-9]{1,3}% · -?[0-9]+ dBm$'
+  check_value GSConnect 0 '^.+$'
+  check_value Devices   0 '^(0 connected|.+)$'
   check_value load      1 '^[0-9]+\.[0-9]+ [0-9]+\.[0-9]+ [0-9]+\.[0-9]+$'
   check_value procs     1 '^[0-9]+$'
   check_value temp      0 '^[0-9]+(°C|C)$'
@@ -660,6 +662,49 @@ if [[ -x "$mc" ]]; then
     pass "default mode still renders panels"
   else
     fail "default mode lost its panels"
+  fi
+fi
+
+# GSConnect must be invisible when it is not installed. A report that
+# names software you do not run is noise, and "GSConnect: not installed"
+# is the exact line this has to avoid.
+if [[ -x "$mc" ]]; then
+  gsc_installed=0
+  shopt -s nullglob
+  gsc_dirs=( "$HOME/.local/share/gnome-shell/extensions/"gsconnect@* \
+             /usr/share/gnome-shell/extensions/gsconnect@* )
+  shopt -u nullglob
+  (( ${#gsc_dirs[@]} )) && gsc_installed=1
+
+  if (( gsc_installed )); then
+    if printf '%s\n' "$lout" | grep -qE '^GSConnect  +'; then
+      pass "GSConnect is installed and reported"
+    else
+      fail "GSConnect is installed but absent from --list"
+    fi
+    # The connected count must always be stated, including when zero.
+    if printf '%s\n' "$lout" | grep -qE '^Devices  +'; then
+      pass "GSConnect connected devices reported"
+    else
+      fail "GSConnect reported without a Devices row"
+    fi
+  else
+    pass "GSConnect not installed on this machine — skipping positive checks"
+  fi
+
+  # The negative case is the important one, and it is testable
+  # regardless: point HOME at an empty directory. This only proves
+  # anything when the extension is not installed system-wide too.
+  if [[ ! -d /usr/share/gnome-shell/extensions/gsconnect@andyholmes.github.io ]]; then
+    tmp_home="$(mktemp -d)"
+    gsc_leak="$(HOME="$tmp_home" timeout 25 "$mc" --list </dev/null 2>/dev/null \
+                | grep -ic 'gsconnect' || true)"
+    rmdir "$tmp_home" 2>/dev/null || rm -rf "$tmp_home"
+    if [[ "$gsc_leak" == 0 ]]; then
+      pass "GSConnect is silent when not installed"
+    else
+      fail "GSConnect mentioned $gsc_leak time(s) despite not being installed"
+    fi
   fi
 fi
 

@@ -481,6 +481,7 @@ os_name='' kernel='' uptime_s='' pkgs='' machine='' bios='' chassis='' brand=''
 cpu_model='' cores=0 threads=0 clock_mhz=0 clock_max_mhz=0
 mem_total=0 mem_used=0 mem_cached=0 swap_total=0 swap_used=0
 load_txt='' proc_count='' temp_c='' bat_pct='' bat_state='' bat_health=''
+gsc_present=0 gsc_name='' gsc_connected=()
 wifi_if='' wifi_qual='' wifi_dbm='' wifi_ssid=''
 bt_present=0 bt_blocked=0 bt_conns=0
 gateway='' dns_txt='' primary_ip='' default_iface=''
@@ -616,6 +617,7 @@ collect_linux() {
 
   collect_linux_net
   collect_linux_disks
+  collect_gsconnect
 }
 
 collect_linux_net() {
@@ -722,6 +724,62 @@ collect_linux_net() {
     slurp_v "$ifp/operstate"; [[ $REPLY == up ]] || continue
     nets+=( "$nm" )
   done
+}
+
+# GSConnect — the GNOME implementation of the KDE Connect protocol,
+# which pairs a phone with this machine.
+#
+# Everything below is skipped entirely when the extension is not
+# installed: no key, no "not installed" line, nothing. A report that
+# names software you do not run is noise.
+collect_gsconnect() {
+  local d
+  for d in "$HOME/.local/share/gnome-shell/extensions/"gsconnect@* \
+           /usr/share/gnome-shell/extensions/gsconnect@*; do
+    [[ -d "$d" ]] && { gsc_present=1; break; }
+  done
+  (( gsc_present )) || return 0
+
+  # The name this machine advertises to paired phones, which is
+  # configurable and need not match the hostname.
+  #
+  # Read through dconf rather than gsettings: the extension ships its
+  # own schema inside its extension directory, so it is not on the
+  # system schema path and `gsettings get` fails with "No such schema".
+  if have dconf; then
+    local n
+    n="$(dconf read /org/gnome/shell/extensions/gsconnect/name 2>/dev/null)"
+    n="${n#\'}"; n="${n%\'}"
+    [[ -n "$n" ]] && gsc_name="$n"
+  fi
+
+  # Which devices are actually CONNECTED comes from D-Bus. dconf only
+  # knows what has been PAIRED, which is a different question — a phone
+  # stays paired while it is switched off, in another country, or on a
+  # different network.
+  if have gdbus; then
+    local line name in_device=0 conn=0
+    while IFS= read -r line; do
+      case "$line" in
+        *"/GSConnect/Device/"*)
+          in_device=1; conn=0 ;;
+        *"readonly b Connected = true"*)
+          (( in_device )) && conn=1 ;;
+        *"readonly s Name = "*)
+          # Connected is introspected before Name within a device node,
+          # so by the time the name appears its state is already known.
+          if (( in_device && conn )); then
+            name="${line#*= \'}"; name="${name%\';}"
+            [[ -n "$name" ]] && gsc_connected+=( "$name" )
+          fi
+          conn=0 ;;
+      esac
+    done < <(gdbus introspect --session \
+               --dest org.gnome.Shell.Extensions.GSConnect \
+               --object-path /org/gnome/Shell/Extensions/GSConnect/Device \
+               --recurse 2>/dev/null)
+  fi
+  return 0
 }
 
 collect_linux_disks() {
@@ -1111,6 +1169,20 @@ if [[ -n "$wifi_if" ]]; then
     panel_row "Signal" "${wcol}${wq}%${R}${wifi_dbm:+ ${D}${G_SEP} ${wifi_dbm} dBm${R}}"
   fi
 fi
+# Only rendered when the extension is actually installed — see
+# collect_gsconnect. Nothing is said about it otherwise.
+if (( gsc_present )); then
+  panel_rule
+  [[ -n "$gsc_name" ]] && panel_row "GSConnect" "$gsc_name"
+  if (( ${#gsc_connected[@]} )); then
+    gsc_list=''
+    for gsc_d in "${gsc_connected[@]}"; do gsc_list+="${gsc_list:+, }${gsc_d}"; done
+    panel_row "Devices" "${GRN}${G_DOT}${R} ${gsc_list}"
+  else
+    panel_row "Devices" "${D}0 connected${R}"
+  fi
+fi
+
 if (( bt_present )); then
   if (( bt_blocked )); then
     panel_row "Bluetooth" "${YEL}blocked${R}"

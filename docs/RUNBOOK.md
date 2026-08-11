@@ -76,6 +76,12 @@ asciify --width 40 "FITS?"     # prints nothing, exits 1, if wider than 40
 `my-computer` draws its banner by calling `asciify`; if `asciify` is missing or the render would be
 wider than the terminal, it falls back to a boxed header without comment.
 
+**GSConnect** (the GNOME KDE-Connect implementation) appears in the NETWORK panel only when the
+extension is actually installed — the advertised device name, plus the phones currently connected or
+`0 connected`. When it is not installed nothing about it is printed at all, not even a "not
+installed" line. The paired list comes from `dconf`; the *connected* state comes from D-Bus, because
+`dconf` only knows what has been paired and a phone stays paired while switched off.
+
 An **ATTENTION** section appears at the end *only when something needs doing* — a pending reboot, a
 filesystem past 90%, a CPU at 85°C, or a battery below 65% of design capacity. On a healthy machine
 it is absent entirely, so its presence always means something.
