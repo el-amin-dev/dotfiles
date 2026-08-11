@@ -529,6 +529,140 @@ if [[ -x "$mc" ]]; then
   fi
 fi
 
+# --list exists to be parsed, so the properties that matter are the
+# machine-readable ones, not how it looks.
+if [[ -x "$mc" ]]; then
+  for flag in "-l" "--list"; do
+    if timeout 25 "$mc" "$flag" </dev/null >/dev/null 2>&1; then
+      pass "my-computer $flag runs"
+    else
+      fail "my-computer $flag exited non-zero"
+    fi
+  done
+
+  lout="$(timeout 25 "$mc" --list </dev/null 2>/dev/null)"
+
+  # No frame and no blank lines. The class lists box-drawing glyphs
+  # only: '+' and '|' appear in legitimate values such as "+1 more".
+  if [[ -n "$lout" ]] && ! printf '%s\n' "$lout" | grep -qE '^[[:space:]]*$|[╭╮╰╯│├┤─]'; then
+    pass "--list emits no frame characters or blank lines"
+  else
+    fail "--list output still contains UI elements or blank lines"
+  fi
+
+  # THE parsing contract: key and value separated by 2+ spaces, and
+  # neither containing a run of 2+ spaces. A single-space rule would
+  # break on mount points, which are keys and can contain spaces.
+  if printf '%s\n' "$lout" | grep -qE '^.*[^ ]  +[^ ].*$'; then
+    pass "--list separates key and value by 2+ spaces"
+  else
+    fail "--list has no unambiguous key/value separator"
+  fi
+  if printf '%s\n' "$lout" | awk -F'  +' 'NF > 2 { bad++ } END { exit !bad }'; then
+    fail "--list has a value containing a run of 2+ spaces — splitting is ambiguous"
+  else
+    pass "--list values contain no ambiguous space runs"
+  fi
+  # The contract must actually work through the tools it exists for.
+  if [[ "$(printf '%s\n' "$lout" | awk -F'  +' '$1=="Kernel"{print $2}')" \
+        == "$(uname -r)" ]]; then
+    pass "--list round-trips through awk -F'  +'"
+  else
+    fail "--list did not parse correctly with awk -F'  +'"
+  fi
+
+  # Escape codes would land inside values and break cut/awk. This must
+  # hold even on a terminal, which is why colour is forced off.
+  if command -v script >/dev/null 2>&1; then
+    if [[ "$(script -qec "$mc --list" /dev/null 2>/dev/null | grep -c $'\033')" == 0 ]]; then
+      pass "--list is escape-free even on a tty"
+    else
+      fail "--list emitted colour codes on a tty"
+    fi
+  fi
+
+  # A first field on every line is what makes grep/awk usable.
+  bad_lines="$(printf '%s\n' "$lout" | grep -cvE '^[^ ]+ +.+' || true)"
+  if [[ "$bad_lines" == 0 ]]; then
+    pass "--list every line is key + value"
+  else
+    fail "--list has $bad_lines malformed line(s)"
+  fi
+
+  # Keys must be unique enough to select one: a duplicate key makes
+  # `grep '^RAM'` ambiguous.
+  dupes="$(printf '%s\n' "$lout" | awk '{print $1}' | sort | uniq -d | tr '\n' ' ')"
+  if [[ -z "${dupes// /}" ]]; then
+    pass "--list keys are unique"
+  else
+    fail "--list has duplicate keys: $dupes"
+  fi
+
+  # Each value checked against the SHAPE it should have. A key that is
+  # present but carrying nonsense is worse than a missing one, because
+  # a script will happily consume it — this is what catches a collector
+  # that silently starts returning the wrong field.
+  #
+  #   key : required(1/0) : extended regex the value must match
+  check_value() {
+    local key=$1 required=$2 want=$3 got
+    got="$(printf '%s\n' "$lout" | awk -F'  +' -v k="$key" '$1==k{print $2; exit}')"
+    if [[ -z "$got" ]]; then
+      if (( required )); then fail "--list is missing the '$key' key"
+      else                    pass "--list omits '$key' (not applicable here)"
+      fi
+      return
+    fi
+    if printf '%s' "$got" | grep -qE "$want"; then
+      pass "--list $key = '$got'"
+    else
+      fail "--list $key = '$got' does not match /$want/"
+    fi
+  }
+
+  check_value User      1 '^[^ ]+$'
+  check_value Host      1 '^[^ ]+$'
+  check_value Arch      1 '^(x86_64|i[36]86|aarch64|armv[67]l|riscv64|ppc64le|s390x)$'
+  check_value OS        1 '^.{3,}$'
+  check_value Kernel    1 '^[0-9]+\.[0-9]+'
+  check_value Uptime    1 '^([0-9]+d )?([0-9]+h )?[0-9]+m$'
+  check_value Shell     1 '^(zsh|bash|fish|ksh|mksh|dash|sh|tcsh|csh)( [0-9]|$)'
+  check_value Terminal  1 '^[^ ]+$'
+  check_value Packages  0 '^[0-9]+ '
+  check_value CPU       1 '^.{3,}$'
+  check_value Cores     0 '^[0-9]+C · [0-9]+T$'
+  check_value Clock     0 '^[0-9]+\.[0-9]( / [0-9]+\.[0-9])? GHz$'
+  check_value RAM       1 '^[0-9]{1,3}% [0-9.]+ / [0-9.]+ (KiB|MiB|GiB)$'
+  check_value Swap      0 '^[0-9]{1,3}% [0-9.]+ / [0-9.]+ (KiB|MiB|GiB)$'
+  check_value /         1 '^[0-9]{1,3}% [0-9.]+ / [0-9.]+ (KiB|MiB|GiB)$'
+  check_value IPv4      0 '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  check_value Gateway   0 '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  check_value Signal    0 '^[0-9]{1,3}% · -?[0-9]+ dBm$'
+  check_value load      1 '^[0-9]+\.[0-9]+ [0-9]+\.[0-9]+ [0-9]+\.[0-9]+$'
+  check_value procs     1 '^[0-9]+$'
+  check_value temp      0 '^[0-9]+(°C|C)$'
+  check_value battery   0 '^[0-9]{1,3}%'
+
+  # Default rendering must be untouched by any of this. Matched on the
+  # spaced panel title, NOT on a frame glyph: the frame is ASCII in a
+  # non-UTF-8 locale, and a bracket expression containing a multibyte
+  # character matches individual BYTES under LC_ALL=C, so a glyph-based
+  # pattern fails for reasons that have nothing to do with the code.
+  # " SYSTEM " appears only in a panel heading.
+  #
+  # Captured first rather than piped straight into `grep -q`: grep exits
+  # the moment it matches, my-computer then dies of SIGPIPE, and with
+  # `set -o pipefail` that non-zero status becomes the pipeline's — so
+  # the test would report failure precisely when the match SUCCEEDS.
+  # The same PIPE_FAIL trap ADR-005 describes for the prompt.
+  panel_out="$(timeout 25 "$mc" --no-banner --no-color --width 76 </dev/null 2>/dev/null)"
+  if [[ "$panel_out" == *" SYSTEM "* ]]; then
+    pass "default mode still renders panels"
+  else
+    fail "default mode lost its panels"
+  fi
+fi
+
 # Speed is a feature here: this runs interactively, on demand. The cost
 # is dominated by process creation, because in bash every $(...) forks a
 # subshell — building the report through command substitution once cost

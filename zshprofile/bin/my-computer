@@ -57,10 +57,15 @@
 #  Usage:
 #    my-computer [--all] [--columns N] [--width N]
 #                [--ascii] [--no-color] [--no-banner] [--banner TEXT]
+#    my-computer --list | -l
 #
 #      --all        verbose: virtual interfaces, idle swap, locale,
 #                   reclaimable cache, every USB device
 #      --columns N  force the column count instead of measuring
+#      --list, -l   one flat "key   value" per line: no frame, no
+#                   banner, no meters, no section headings. For grep,
+#                   cut, awk and diff, which a boxed multi-column
+#                   layout makes needlessly hard. Composes with --all.
 # ════════════════════════════════════════════════════════════════════
 set -uo pipefail
 shopt -s extglob 2>/dev/null || true
@@ -70,13 +75,16 @@ OS="$(uname -s 2>/dev/null || printf 'Unknown')"
 
 # ── Options ────────────────────────────────────────────────────────
 use_color=1; show_all=0; width_opt=0; force_ascii=0
-show_banner=1; banner_override=''; col_opt=0
+show_banner=1; banner_override=''; col_opt=0; list_mode=0
 
 [[ -t 1 ]] || use_color=0
 [[ -n "${NO_COLOR:-}" ]] && use_color=0
+# List mode exists to be parsed. Escape codes would land inside the
+# values and defeat that, so colour is off regardless of the terminal.
 
 while (( $# )); do
   case "$1" in
+    -l|--list)   list_mode=1 ;;
     --no-color)  use_color=0 ;;
     --ascii)     force_ascii=1 ;;
     --all)       show_all=1 ;;
@@ -94,6 +102,7 @@ while (( $# )); do
   esac
   shift
 done
+(( list_mode )) && use_color=0
 
 # ── Capabilities ───────────────────────────────────────────────────
 unicode=1
@@ -114,6 +123,11 @@ else
   G_FULL='#' G_EMPTY='.' G_UP='!' G_SEP='-' G_DEG='C' G_DASH='-' G_DOT='*'
   G_ML='+' G_MR='+'
 fi
+
+# Status dots and arrows are decoration. In list mode they would end up
+# embedded in values that are about to be cut or compared, so they are
+# emptied at the source rather than stripped afterwards.
+if (( list_mode )); then G_DOT='' G_UP=''; fi
 
 # One accent, plus dim, plus three status colours. A second decorative
 # hue competes with the accent and the eye stops knowing where to look.
@@ -141,10 +155,15 @@ fi
 term_cols() {
   local c=''
   [[ -n "${COLUMNS:-}" && "$COLUMNS" != *[!0-9]* ]] && (( COLUMNS > 0 )) && c="$COLUMNS"
-  if [[ -z "$c" ]] && have stty && [[ -r /dev/tty ]]; then
-    local _rows _cols
-    read -r _rows _cols < <(stty size </dev/tty 2>/dev/null)
-    [[ -n "${_cols:-}" && "$_cols" != *[!0-9]* ]] && c="$_cols"
+  if [[ -z "$c" ]] && have stty; then
+    # The whole thing runs in a subshell with stderr closed: when there
+    # is no controlling terminal the `</dev/tty` redirection fails in
+    # the SHELL, not in stty, so redirecting stty's own stderr does not
+    # silence it — bash prints "No such device or address" itself.
+    local sz
+    sz="$( { stty size </dev/tty; } 2>/dev/null )" || sz=''
+    local _cols="${sz##* }"
+    [[ -n "$_cols" && "$_cols" != *[!0-9]* ]] && c="$_cols"
   fi
   if [[ -z "$c" ]] && have tput; then
     local t; t="$(tput cols 2>/dev/null)"
@@ -294,16 +313,98 @@ PANEL_FULL=()    # 1 = spans every column
 
 _ptitle=''; _prows=(); _pw=0; _pfull=0
 
-panel_begin() { _ptitle="$1"; _pfull="${2:-0}"; _prows=(); }
+# ── List mode ──────────────────────────────────────────────────────
+# `--list` emits the same facts as one flat key/value stream: no frame,
+# no banner, no meters, no section headings. It exists so the report can
+# be grepped, cut or diffed, which a boxed multi-column layout makes
+# needlessly hard.
+#
+# Rows are buffered one at a time because a continuation row — one with
+# no label, such as a removable drive's mount point — belongs on the
+# same line as the row above it once the frame is gone. Emitting it
+# separately would produce a value with no key.
+_list_label=''; _list_value=''
+
+# The parsing contract, and the reason for it:
+#
+#   key and value are separated by TWO OR MORE spaces, and neither
+#   contains a run of two or more spaces.
+#
+# A single space would not do. Keys are not always single tokens — a
+# mount point is a key, and a removable drive labelled "UBUNTU 26_0"
+# mounts at a path containing a space, so `awk '{print $1}'` would cut
+# it in half. Splitting on a run of spaces stays correct regardless:
+#
+#   my-computer -l | awk -F'  +' '{ print $1 "=" $2 }'
+#   my-computer -l | sed 's/  \+/\t/'
+#
+# The padding to column 15 is alignment for human eyes; the guarantee
+# is the two-space minimum, which holds even when a key is longer than
+# the column.
+list_flush() {
+  [[ -n "$_list_label" ]] || return 0
+  local pad=$(( 15 - ${#_list_label} ))
+  (( pad < 2 )) && pad=2
+  rep_v ' ' "$pad"
+  printf '%s%s%s\n' "$_list_label" "$REPLY" "$_list_value"
+  _list_label=''; _list_value=''
+  return 0
+}
+
+list_row() {
+  local label=$1 value=$2
+  strip_v "$value"; value=$REPLY
+  # Collapse runs of spaces so alignment padding from the panel layer
+  # does not survive into output meant for cut and awk.
+  while [[ "$value" == *"  "* ]]; do value="${value//  / }"; done
+  value="${value# }"; value="${value%"${value##*[![:space:]]}"}"
+  if [[ -z "$label" ]]; then
+    [[ -n "$value" ]] && _list_value+=" ${value}"
+    return 0
+  fi
+  list_flush
+  # An empty value is omitted rather than printed as a dash: absence is
+  # more useful than a placeholder when the output is being filtered.
+  [[ -z "$value" ]] && return 0
+  _list_label=$label; _list_value=$value
+  return 0
+}
+
+panel_begin() {
+  if (( list_mode )); then list_flush; return 0; fi
+  _ptitle="$1"; _pfull="${2:-0}"; _prows=()
+}
 
 # Rows carry a unit separator between label and value so a value may
 # contain anything, spaces included.
-panel_row()  { _prows+=( "$1"$'\x1f'"$2" ); }
-panel_rule() { _prows+=( $'\x1e' ); }
+panel_row()  { if (( list_mode )); then list_row "$1" "$2"; else _prows+=( "$1"$'\x1f'"$2" ); fi; }
+panel_rule() { (( list_mode )) || _prows+=( $'\x1e' ); }
 # Full-bleed text: no label column, so it may use the panel's whole
 # inner width. Continuation lines under a labelled row use panel_row
 # with an empty label instead, which keeps the indent.
-panel_text() { _prows+=( $'\x1d'"$1" ); }
+panel_text() {
+  if (( list_mode )); then
+    # STATUS packs several metrics onto one line for the panel. Flat
+    # output wants them as separate keys, so they are split back apart
+    # on the run of spaces that joined them.
+    local seg rest="$1"
+    strip_v "$rest"; rest=$REPLY
+    while [[ -n "$rest" ]]; do
+      case "$rest" in
+        *"   "*) seg="${rest%%   *}"; rest="${rest#*   }" ;;
+        *)       seg="$rest"; rest='' ;;
+      esac
+      seg="${seg# }"
+      [[ -z "$seg" ]] && continue
+      # "load 0.96 1.02 1.00" -> key "load", value the rest.
+      if [[ "$seg" == *' '* ]]; then list_row "${seg%% *}" "${seg#* }"
+      else                           list_row "$seg" ''
+      fi
+    done
+    return 0
+  fi
+  _prows+=( $'\x1d'"$1" )
+}
 
 # A meter sized to the panel: bar, then the percentage. Detail goes on
 # a continuation line when the panel is too narrow to carry it inline,
@@ -311,6 +412,9 @@ panel_text() { _prows+=( $'\x1d'"$1" ); }
 panel_meter() {
   local label=$1 pct=$2 detail=$3
   (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
+  # A bar is a UI element; flat output states the number instead.
+  # Percentage first, so a column of them lines up under cut or awk.
+  if (( list_mode )); then list_row "$label" "${pct}% ${detail}"; return 0; fi
   local avail=$(( _pw - 4 - LW - 1 ))     # inside borders, after label
   local barw=$(( avail - 5 ))             # room for " 100%"
   (( barw > 16 )) && barw=16
@@ -333,6 +437,7 @@ panel_meter() {
 }
 
 panel_end() {
+  if (( list_mode )); then list_flush; return 0; fi
   local inner=$(( _pw - 2 )) out='' t=" $_ptitle " fill row label value line pad
   fill=$(( inner - 1 - ${#t} ))
   (( fill < 0 )) && fill=0
@@ -727,8 +832,17 @@ slurp_v /proc/sys/kernel/hostname; host=$REPLY
 user="${USER:-${LOGNAME:-$(id -un 2>/dev/null)}}"
 arch="$(cmd1 uname -m)"
 
-printf '\n'
-if (( show_banner )) && have asciify; then
+if (( list_mode )); then
+  # The framed header carries user, host and uptime. Flat output still
+  # needs those facts, just as ordinary keys.
+  list_row "User" "$user"
+  list_row "Host" "$host"
+  [[ -n "$arch" ]] && list_row "Arch" "$arch"
+  list_flush
+fi
+
+(( list_mode )) || printf '\n'
+if (( show_banner && ! list_mode )) && have asciify; then
   banner_text="${banner_override:-$brand}"
   if [[ -n "$banner_text" ]]; then
     bargs=( --trim --width "$FULLW" )
@@ -764,9 +878,13 @@ while (( idn > 0 )); do
   (( ${#user} + 1 + ${#host} + 3 + ${#idtail} <= W )) && break
   idn=$(( idn - 1 ))
 done
-idline="${B}${user}@${host}${R}"
-(( idn > 0 )) && idline+="${D} ${G_SEP} ${idtail}${R}"
-printf '  %s\n\n' "$idline"
+# The framed identity line is part of the UI. List mode already emitted
+# User, Host and Arch as ordinary keys above.
+if (( ! list_mode )); then
+  idline="${B}${user}@${host}${R}"
+  (( idn > 0 )) && idline+="${D} ${G_SEP} ${idtail}${R}"
+  printf '  %s\n\n' "$idline"
+fi
 
 # ── Build panels, most important first ─────────────────────────────
 # ATTENTION leads because it is the only one that ever demands action,
@@ -948,7 +1066,14 @@ if (( ${#fs_rows[@]} )); then
   for row in "${fs_rows[@]}"; do
     mnt="${row%%$'\x1f'*}"; rest="${row#*$'\x1f'}"
     pct="${rest%%$'\x1f'*}"; det="${rest#*$'\x1f'}"
-    panel_meter "$(vfit "$mnt" $LW)" "$pct" "$det"
+    # The panel truncates a long mount point to fit its label column;
+    # list mode must not, or the key stops matching the real path and
+    # `grep '^/run/media/...'` finds nothing.
+    if (( list_mode )); then
+      panel_meter "$mnt" "$pct" "$det"
+    else
+      panel_meter "$(vfit "$mnt" $LW)" "$pct" "$det"
+    fi
   done
 else
   panel_row "Disks" ""
@@ -1112,6 +1237,13 @@ emit_row() {
     printf '%s\n' "${out%"${out##*[![:space:]]}"}"
   done
 }
+
+# List mode already emitted everything as it went; there are no panels
+# to lay out and nothing further to print.
+if (( list_mode )); then
+  list_flush
+  exit 0
+fi
 
 row=()
 for i in "${!PANELS[@]}"; do
