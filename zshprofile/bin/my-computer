@@ -125,22 +125,52 @@ else
 fi
 
 # ── Responsive layout ──────────────────────────────────────────────
+# Finding the real terminal width is the whole basis of the layout, and
+# $COLUMNS alone does NOT provide it. Interactive shells maintain
+# COLUMNS as a shell variable but do not EXPORT it, so a child process
+# like this one sees nothing — which silently pinned the report to the
+# fallback width and one column no matter how wide the window was.
+#
+# Sources, in order of trustworthiness:
+#   1. $COLUMNS      only meaningful if the caller deliberately exported it
+#   2. stty size     asks the controlling terminal directly, and keeps
+#                    working when stdout is redirected, because it reads
+#                    /dev/tty rather than fd 1
+#   3. tput cols     ncurses' answer; falls back to $TERM's terminfo
+#   4. 80            the historical default, and a safe last resort
+term_cols() {
+  local c=''
+  [[ -n "${COLUMNS:-}" && "$COLUMNS" != *[!0-9]* ]] && (( COLUMNS > 0 )) && c="$COLUMNS"
+  if [[ -z "$c" ]] && have stty && [[ -r /dev/tty ]]; then
+    local _rows _cols
+    read -r _rows _cols < <(stty size </dev/tty 2>/dev/null)
+    [[ -n "${_cols:-}" && "$_cols" != *[!0-9]* ]] && c="$_cols"
+  fi
+  if [[ -z "$c" ]] && have tput; then
+    local t; t="$(tput cols 2>/dev/null)"
+    [[ -n "$t" && "$t" != *[!0-9]* ]] && c="$t"
+  fi
+  [[ -z "$c" || "$c" == *[!0-9]* ]] && c=80
+  printf '%d' "$c"
+}
+
 if (( width_opt > 0 )); then
   W=$width_opt
 else
-  W=$(( ${COLUMNS:-0} - 4 ))
-  (( W <= 0 )) && W=72          # not a tty: assume a conventional width
+  W=$(( $(term_cols) - 4 ))     # 2-column indent on each side
   (( W < 40 )) && W=40
 fi
 
 GAP=2
-MINBOX=36                        # below this a two-column row stops being
-                                 # readable: labels and values collide
+MINBOX=34                        # below this a panel stops being readable:
+                                 # the label and value columns collide
+MAXCOL=4                         # past four, the eye has to travel too far
+                                 # back to the left to start the next row
 if (( col_opt > 0 )); then
   NCOL=$col_opt
 else
   NCOL=1
-  while (( NCOL < 3 )); do
+  while (( NCOL < MAXCOL )); do
     if (( (W - NCOL * GAP) / (NCOL + 1) >= MINBOX )); then
       NCOL=$(( NCOL + 1 ))
     else
@@ -161,6 +191,16 @@ slurp() { local l; [[ -r "$1" ]] && IFS= read -r l < "$1" 2>/dev/null && printf 
 cmd1()  { local o; o="$("$@" 2>/dev/null)" || return; printf '%s' "${o%%$'\n'*}"; }
 sysctl_n() { have sysctl && cmd1 sysctl -n "$1"; }
 rtrim() { local s=$1; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+
+# /proc/mounts escapes characters that would break its own field
+# splitting, as octal: a space becomes \040, a tab \011. Printed raw,
+# a USB stick labelled "UBUNTU 26_0" shows up as "UBUNTU\04026_0".
+unescape_mount() {
+  local s=$1
+  s="${s//\\040/ }"; s="${s//\\011/	}"
+  s="${s//\\012/ }"; s="${s//\\134/\\}"
+  printf '%s' "$s"
+}
 
 # Visible length: colour codes occupy no columns, so every width
 # calculation has to measure the text with them removed.
@@ -671,11 +711,22 @@ if (( show_banner )) && have asciify; then
     fi
   fi
 fi
-idline="${B}${user}@${host}${R}${D} ${G_SEP} ${os_name:-$OS}"
-[[ -n "$arch"     ]] && idline+=" ${G_SEP} $arch"
-[[ -n "$uptime_s" ]] && idline+=" ${G_SEP} up $(hsecs "$uptime_s")"
-idline+="${R}"
-printf '  %s\n\n' "$(vfit "$idline" "$FULLW")"
+# Assemble from whole fields and drop them from the least important end
+# until it fits, rather than slicing mid-word. "Ubuntu 26.04 LTS · x8…"
+# tells the reader less than simply omitting the architecture would.
+idparts=( "${os_name:-$OS}" )
+[[ -n "$arch"     ]] && idparts+=( "$arch" )
+[[ -n "$uptime_s" ]] && idparts+=( "up $(hsecs "$uptime_s")" )
+idn=${#idparts[@]}
+while (( idn > 0 )); do
+  idtail=''
+  for (( ii = 0; ii < idn; ii++ )); do idtail+="${idtail:+ ${G_SEP} }${idparts[ii]}"; done
+  (( ${#user} + 1 + ${#host} + 3 + ${#idtail} <= W )) && break
+  idn=$(( idn - 1 ))
+done
+idline="${B}${user}@${host}${R}"
+(( idn > 0 )) && idline+="${D} ${G_SEP} ${idtail}${R}"
+printf '  %s\n\n' "$idline"
 
 # ── Build panels, most important first ─────────────────────────────
 # ATTENTION leads because it is the only one that ever demands action,
@@ -712,7 +763,7 @@ if have df; then
         ext2|ext3|ext4|xfs|btrfs|f2fs|zfs|vfat|exfat|ntfs|ntfs3) ;;
         *) continue ;;
       esac
-      scan_mount "$dev" "$mnt"
+      scan_mount "$dev" "$(unescape_mount "$mnt")"
     done < /proc/mounts
   else
     while read -r dev _ _ _ _ mnt; do
@@ -737,9 +788,32 @@ panel_begin "SYSTEM"
 panel_row "OS"       "${os_name:-$OS}"
 panel_row "Kernel"   "$kernel"
 [[ -n "$uptime_s" ]] && panel_row "Uptime" "$(hsecs "$uptime_s")"
-if   [[ -n "${ZSH_VERSION:-}"  ]]; then panel_row "Shell" "zsh $ZSH_VERSION"
-elif [[ -n "${BASH_VERSION:-}" ]]; then panel_row "Shell" "bash ${BASH_VERSION%%(*}"
-else                                    panel_row "Shell" "${SHELL##*/}"; fi
+# The shell the USER runs — NOT the one interpreting this script.
+# $BASH_VERSION is always set here, because my-computer has a bash
+# shebang, so trusting it reported "bash 5.3.9" to someone whose shell
+# is zsh. It describes this file's interpreter and nothing else.
+#
+# The parent process is the shell that actually invoked this, which
+# beats $SHELL when someone is running something other than their login
+# shell. $SHELL is the fallback.
+shell_name=''
+if [[ -r "/proc/$PPID/comm" ]]; then
+  parent_cmd="$(slurp "/proc/$PPID/comm")"
+  case "$parent_cmd" in
+    zsh|bash|fish|ksh|mksh|dash|sh|tcsh|csh|elvish|nu) shell_name="$parent_cmd" ;;
+  esac
+fi
+[[ -z "$shell_name" ]] && shell_name="${SHELL##*/}"
+shell_ver=''
+if [[ -n "$shell_name" ]] && have "$shell_name"; then
+  # Ask that shell for its own version — one exec, only on this line.
+  case "$shell_name" in
+    zsh)  shell_ver="$(cmd1 "$shell_name" -c 'print -rn -- $ZSH_VERSION')" ;;
+    bash) shell_ver="$(cmd1 "$shell_name" -c 'printf %s "${BASH_VERSION%%(*}"')" ;;
+    fish) shell_ver="$(cmd1 "$shell_name" --version)"; shell_ver="${shell_ver##* }" ;;
+  esac
+fi
+panel_row "Shell" "${shell_name:-—}${shell_ver:+ $shell_ver}"
 desktop="${XDG_CURRENT_DESKTOP:-}"; desktop="${desktop#*:}"
 [[ "$OS" == Darwin && -z "$desktop" ]] && desktop="Aqua"
 [[ -n "${XDG_SESSION_TYPE:-}" ]] && desktop="${desktop:+$desktop ${G_SEP} }${XDG_SESSION_TYPE}"
@@ -905,7 +979,7 @@ if (( ${#removables[@]} || ${#usb_names[@]} )); then
     mounted=''
     if [[ -r /proc/mounts ]]; then
       while read -r dev mnt _; do
-        [[ "$dev" == /dev/"$nm"* ]] && { mounted="$mnt"; break; }
+        [[ "$dev" == /dev/"$nm"* ]] && { mounted="$(unescape_mount "$mnt")"; break; }
       done < /proc/mounts
     fi
     panel_row "$nm" "${GRN}${G_DOT}${R} $(hkib "$kib") ${D}${G_SEP} ${mdl}${R}"
@@ -928,24 +1002,43 @@ fi
 # boxing it into one grid cell would waste the rest of the row.
 _pw=$FULLW
 panel_begin "STATUS" 1
-statline=''
-[[ -n "$load_txt" ]] && statline+="${D}load${R} $load_txt"
-if [[ -n "$proc_count" ]]; then
-  statline+="${statline:+   }${D}procs${R} $proc_count"
-fi
+# Built as discrete segments so they can be PACKED across as many lines
+# as it takes. Truncating here silently deleted the battery reading —
+# and a status line that drops the status is worse than a taller panel.
+statseg=()
+[[ -n "$load_txt"   ]] && statseg+=( "${D}load${R} $load_txt" )
+[[ -n "$proc_count" ]] && statseg+=( "${D}procs${R} $proc_count" )
 if [[ -n "$temp_c" ]]; then
   if   (( temp_c >= 85 )); then tcol=$RED
   elif (( temp_c >= 70 )); then tcol=$YEL
   else                          tcol=$GRN
   fi
-  statline+="${statline:+   }${D}temp${R} ${tcol}${temp_c}${G_DEG}${R}"
+  statseg+=( "${D}temp${R} ${tcol}${temp_c}${G_DEG}${R}" )
 fi
 if [[ -n "$bat_pct" ]]; then
-  statline+="${statline:+   }${D}battery${R} $(sev $(( 100 - bat_pct )))${bat_pct}%${R}"
-  [[ -n "$bat_state"  ]] && statline+=" ${D}${bat_state}${R}"
-  [[ -n "$bat_health" ]] && statline+=" ${D}(health ${bat_health}%)${R}"
+  # sev() reads "higher is worse", so it is fed the DEPLETION, not the
+  # charge: a full battery must not come out red.
+  seg="${D}battery${R} $(sev $(( 100 - bat_pct )))${bat_pct}%${R}"
+  [[ -n "$bat_state"  ]] && seg+=" ${D}${bat_state}${R}"
+  [[ -n "$bat_health" ]] && seg+=" ${D}health ${bat_health}%${R}"
+  statseg+=( "$seg" )
 fi
-panel_text "${statline:-${D}no live metrics available${R}}"
+if (( ${#statseg[@]} == 0 )); then
+  panel_text "${D}no live metrics available${R}"
+else
+  avail=$(( FULLW - 6 ))
+  cur=''
+  for seg in "${statseg[@]}"; do
+    if [[ -z "$cur" ]]; then
+      cur="$seg"
+    elif (( $(vlen "$cur") + 3 + $(vlen "$seg") <= avail )); then
+      cur+="   $seg"
+    else
+      panel_text "$cur"; cur="$seg"
+    fi
+  done
+  [[ -n "$cur" ]] && panel_text "$cur"
+fi
 panel_end
 
 # ── Lay the panels out ─────────────────────────────────────────────
