@@ -1,0 +1,681 @@
+#!/usr/bin/env bash
+# ════════════════════════════════════════════════════════════════════
+#  my-computer — what this machine is, and how it is doing right now.
+#
+#  A neofetch-style report that depends on NO system-info package.
+#  Facts come from the operating system's own interfaces:
+#
+#    Linux   /etc/os-release · /proc/{cpuinfo,meminfo,uptime,loadavg}
+#            /proc/{mounts,net/route,net/fib_trie} · /sys/class/*
+#            /sys/devices/virtual/dmi/id/* · /var/lib/dpkg/info/*.list
+#    macOS   sw_vers · sysctl · vm_stat · pmset      (all part of macOS)
+#    BSD     sysctl · /etc/os-release where present
+#
+#  ── Portability ───────────────────────────────────────────────────
+#  Runs anywhere zsh does, and adapts rather than failing:
+#
+#    • Linux, macOS and the BSDs each have their own collectors; any
+#      fact the platform will not give up is shown as "—".
+#    • Non-UTF-8 terminals get an ASCII frame and meters automatically
+#      (forced with --ascii), so nothing turns into mojibake over a
+#      serial console or in a minimal container.
+#    • Colour is dropped when piped, when $NO_COLOR is set, or with
+#      --no-color. The layout is identical either way.
+#    • Width follows $COLUMNS, clamped to stay readable.
+#
+#  ── External commands, and why each is safe to rely on ────────────
+#  Arithmetic, string handling and padding use shell builtins only.
+#  The few external programs are base-system tools on their platform,
+#  never third-party packages:
+#
+#    uname            everywhere    platform and architecture
+#    df               everywhere    filesystem usage — needs statfs(2),
+#                                   which a shell cannot call itself
+#    sort             everywhere    de-duplicating GPUs and addresses
+#    awk              everywhere    one indexed scan of pci.ids (~25k
+#                                   lines); a bash read loop takes ~0.5s
+#    sysctl vm_stat   macOS/BSD     CPU, memory, uptime
+#    sw_vers pmset    macOS         product version, battery
+#
+#  Every one is probed with `have` before use; a missing tool costs one
+#  line of output, never the report.
+#
+#  Usage:  my-computer [--no-color] [--ascii] [--width N] [--all] [--help]
+#
+#      --all     also list virtual interfaces (docker, veth, bridges),
+#                which are collapsed to a count by default
+# ════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+OS="$(uname -s 2>/dev/null || printf 'Unknown')"
+
+# ── Options and capabilities ───────────────────────────────────────
+use_color=1
+show_all=0
+width_opt=0
+force_ascii=0
+
+[[ -t 1 ]] || use_color=0
+[[ -n "${NO_COLOR:-}" ]] && use_color=0
+
+while (( $# )); do
+  case "$1" in
+    --no-color) use_color=0 ;;
+    --ascii)    force_ascii=1 ;;
+    --all)      show_all=1 ;;
+    --width)    shift; width_opt="${1:-0}" ;;
+    -h|--help)
+      while IFS= read -r l; do
+        [[ "$l" == '#'* ]] || break
+        printf '%s\n' "${l/\# /}"
+      done < <(tail -n +2 "$0")
+      exit 0 ;;
+    *) printf 'my-computer: unknown option %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# Box-drawing and meter glyphs exist only in UTF-8. A terminal in a
+# C/POSIX or 8-bit locale renders them as replacement characters, which
+# looks far worse than plain ASCII — so detect and step down.
+unicode=1
+(( force_ascii )) && unicode=0
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+  *UTF-8*|*utf-8*|*UTF8*|*utf8*) ;;
+  *) unicode=0 ;;
+esac
+
+if (( unicode )); then
+  G_TL='╭' G_TR='╮' G_BL='╰' G_BR='╯' G_H='─' G_V='│'
+  G_FULL='█' G_EMPTY='░' G_UP='▲' G_SEP='·' G_DEG='°C' G_DASH='—'
+else
+  # G_SEP is deliberately NOT '|': the frame already uses that glyph, and
+  # an inline '|' inside the header box reads as a broken border.
+  G_TL='+' G_TR='+' G_BL='+' G_BR='+' G_H='-' G_V='|'
+  G_FULL='#' G_EMPTY='.' G_UP='*' G_SEP='-' G_DEG='C' G_DASH='-'
+fi
+
+if (( use_color )); then
+  R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
+  RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'
+  MAG=$'\033[35m'; CYN=$'\033[36m'
+else
+  R='' B='' D='' RED='' GRN='' YEL='' MAG='' CYN=''
+fi
+
+# ── Layout ─────────────────────────────────────────────────────────
+if (( width_opt > 0 )); then
+  W=$width_opt
+else
+  W=$(( ${COLUMNS:-0} - 4 ))
+  (( W <= 0 )) && W=72          # not a tty: pick a fixed, sane width
+  (( W > 72 )) && W=72
+  (( W < 46 )) && W=46
+fi
+LABEL_W=13                       # sized to the longest label, "Temperature"
+BAR_W=16
+
+# ── Builtin-only helpers ───────────────────────────────────────────
+rep()   { local c=$1 n=$2 s=''; while (( n-- > 0 )); do s+="$c"; done; printf '%s' "$s"; }
+slurp() { local l; [[ -r "$1" ]] && IFS= read -r l < "$1" 2>/dev/null && printf '%s' "$l"; }
+
+# First line of a command's output, or empty. Keeps every platform
+# probe a one-liner that cannot leak an error message into the report.
+cmd1() { local o; o="$("$@" 2>/dev/null)" || return; printf '%s' "${o%%$'\n'*}"; }
+
+sysctl_n() { have sysctl && cmd1 sysctl -n "$1"; }
+
+hr() {
+  # Two statements, not one `local`: bash expands every word of a
+  # `local` before performing any assignment, so ${#name} would read an
+  # unbound variable — fatal under `set -u`.
+  local name=$1
+  local pad=$(( W - ${#name} - 3 ))
+  (( pad < 0 )) && pad=0
+  printf '\n  %s%s%s %s%s%s\n' "$B$CYN" "$name" "$R" "$D" "$(rep "$G_H" $pad)" "$R"
+}
+
+kv() {
+  local label=$1 value=$2
+  [[ -z "${value//[[:space:]]/}" ]] && value="${D}${G_DASH}${R}"
+  printf '    %s%-*s%s %s\n' "$D" "$LABEL_W" "$label" "$R" "$value"
+}
+
+# KiB → human, one decimal from GiB up. Integer maths only.
+hkib() {
+  local k=$1
+  if   (( k >= 1048576 )); then printf '%d.%d GiB' $(( k / 1048576 )) $(( (k % 1048576) * 10 / 1048576 ))
+  elif (( k >= 1024    )); then printf '%d MiB'    $(( k / 1024 ))
+  else                          printf '%d KiB'    "$k"
+  fi
+}
+
+# "used / total UNIT" — a single unit for the pair, chosen from the
+# total, so the two numbers can be compared without arithmetic.
+hpair() {
+  local u=$1 t=$2
+  if (( t >= 1048576 )); then
+    printf '%d.%d / %d.%d GiB' $(( u / 1048576 )) $(( (u % 1048576) * 10 / 1048576 )) \
+                               $(( t / 1048576 )) $(( (t % 1048576) * 10 / 1048576 ))
+  elif (( t >= 1024 )); then
+    printf '%d / %d MiB' $(( u / 1024 )) $(( t / 1024 ))
+  else
+    printf '%d / %d KiB' "$u" "$t"
+  fi
+}
+
+hsecs() {
+  local s=${1%%.*} o=''
+  (( s >= 86400 )) && { o+="$(( s / 86400 ))d "; s=$(( s % 86400 )); }
+  (( s >= 3600  )) && { o+="$(( s / 3600  ))h "; s=$(( s % 3600  )); }
+  o+="$(( s / 60 ))m"
+  printf '%s' "$o"
+}
+
+sev() {
+  local p=$1
+  if   (( p >= 90 )); then printf '%s' "$RED"
+  elif (( p >= 75 )); then printf '%s' "$YEL"
+  else                     printf '%s' "$GRN"
+  fi
+}
+
+# A meter row: bar, right-aligned percentage, then detail. The percent
+# sits between the two so a column of meters can be scanned vertically
+# without reading a single value.
+meter() {
+  local label=$1 pct=$2 detail=$3 filled
+  (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
+  filled=$(( pct * BAR_W / 100 ))
+  # Never an empty bar for a non-zero value, nor a full bar below 100 —
+  # both misread at a glance.
+  (( filled == 0 && pct > 0 )) && filled=1
+  (( filled == BAR_W && pct < 100 )) && filled=$(( BAR_W - 1 ))
+  local bar="$(sev "$pct")$(rep "$G_FULL" $filled)$R$D$(rep "$G_EMPTY" $(( BAR_W - filled )))$R"
+  kv "$label" "$bar $(sev "$pct")$(printf '%3d%%' "$pct")$R  ${D}${detail}${R}"
+}
+
+sep() { printf ' %s%s%s ' "$D" "$G_SEP" "$R"; }
+
+# ════════════════════════════════════════════════════════════════════
+#  Collectors — one implementation per platform, each setting the same
+#  variables. Anything a platform cannot answer stays empty and prints
+#  as a dash.
+# ════════════════════════════════════════════════════════════════════
+os_name='' kernel='' uptime_s='' pkgs='' machine='' bios=''
+cpu_model='' cores=0 threads=0 clock_mhz=0
+mem_total=0 mem_used=0 swap_total=0 swap_used=0
+load_txt='' proc_count='' temp_c='' bat_pct='' bat_state=''
+
+collect_linux() {
+  if [[ -r /etc/os-release ]]; then
+    while IFS='=' read -r k v; do
+      v="${v%\"}"; v="${v#\"}"
+      [[ "$k" == PRETTY_NAME ]] && os_name="$v"
+    done < /etc/os-release
+  fi
+  kernel="$(slurp /proc/sys/kernel/osrelease)"
+  read -r uptime_s _ < /proc/uptime 2>/dev/null || uptime_s=''
+
+  if [[ -d /var/lib/dpkg/info ]]; then
+    # One .list per installed package. A glob, rather than parsing the
+    # status file, which also carries removed-but-not-purged entries.
+    shopt -s nullglob; local l=( /var/lib/dpkg/info/*.list ); shopt -u nullglob
+    (( ${#l[@]} )) && pkgs="${#l[@]} ${D}dpkg${R}"
+  elif [[ -d /var/lib/rpm ]] && have rpm; then
+    pkgs="$(cmd1 rpm -qa --qf '.') ${D}rpm${R}"
+  fi
+
+  local dmi=/sys/devices/virtual/dmi/id
+  local vendor product
+  vendor="$(slurp $dmi/sys_vendor)"; product="$(slurp $dmi/product_name)"
+  machine="$product"
+  [[ -n "$vendor" && "$product" != "$vendor"* ]] && machine="$vendor $product"
+  local bv bd
+  bv="$(slurp $dmi/bios_version)"; bd="$(slurp $dmi/bios_date)"
+  [[ -n "$bv" ]] && bios="$bv${bd:+ ${D}${G_SEP} ${bd}${R}}"
+
+  # Physical cores are the distinct (physical id, core id) pairs; that
+  # is what separates real cores from hyperthreads, which /proc/cpuinfo
+  # otherwise lists identically.
+  local -A seen=(); local phys='' core=''
+  while IFS= read -r line; do
+    case "$line" in
+      "model name"*)  [[ -z "$cpu_model" ]] && cpu_model="${line#*: }" ;;
+      processor*)     (( threads++ )) ;;
+      "physical id"*) phys="${line#*: }" ;;
+      "core id"*)     core="${line#*: }"; seen["$phys/$core"]=1 ;;
+    esac
+  done < /proc/cpuinfo 2>/dev/null
+  cores=${#seen[@]}
+
+  local sum=0 n=0 f k
+  for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq; do
+    [[ -r "$f" ]] || continue
+    k="$(slurp "$f")"; [[ -z "$k" || "$k" == *[!0-9]* ]] && continue
+    sum=$(( sum + k )); (( n++ ))
+  done
+  (( n )) && clock_mhz=$(( sum / n / 1000 ))
+
+  local key v
+  while read -r key v _; do
+    case "$key" in
+      MemTotal:)     mem_total=$v ;;
+      # Used = total - available, NOT total - free: "free" excludes the
+      # cache and buffers the kernel hands back on demand, which makes
+      # an ordinary system look nearly out of memory.
+      MemAvailable:) mem_used=$v ;;
+      SwapTotal:)    swap_total=$v ;;
+      SwapFree:)     swap_used=$v ;;
+    esac
+  done < /proc/meminfo 2>/dev/null
+  mem_used=$(( mem_total - mem_used ))
+  swap_used=$(( swap_total - swap_used ))
+
+  if [[ -r /proc/loadavg ]]; then
+    local a b c p
+    read -r a b c p _ < /proc/loadavg
+    load_txt="$a  $b  $c"; proc_count="${p#*/}"
+  fi
+
+  # Prefer a labelled package sensor: the generic ACPI zone is often a
+  # chassis reading and sometimes reports 0.
+  local h t z
+  for h in /sys/class/hwmon/hwmon*; do
+    case "$(slurp "$h/name")" in
+      coretemp|k10temp|zenpower|cpu_thermal)
+        t="$(slurp "$h/temp1_input")"
+        [[ -n "$t" && "$t" != *[!0-9]* ]] && { temp_c=$(( t / 1000 )); break; } ;;
+    esac
+  done
+  if [[ -z "$temp_c" ]]; then
+    for z in /sys/class/thermal/thermal_zone*; do
+      case "$(slurp "$z/type")" in
+        x86_pkg_temp|acpitz|cpu*)
+          t="$(slurp "$z/temp")"
+          [[ -n "$t" && "$t" != *[!0-9]* ]] && (( t > 0 )) && { temp_c=$(( t / 1000 )); break; } ;;
+      esac
+    done
+  fi
+
+  local bat a
+  for bat in /sys/class/power_supply/BAT*; do
+    [[ -d "$bat" ]] || continue
+    bat_pct="$(slurp "$bat/capacity")"
+    [[ -z "$bat_pct" || "$bat_pct" == *[!0-9]* ]] && { bat_pct=''; continue; }
+    bat_state="$(slurp "$bat/status")"
+    for a in /sys/class/power_supply/A{C,DP}*; do
+      [[ -r "$a/online" ]] || continue
+      [[ "$(slurp "$a/online")" == 1 ]] && bat_state+=" ${G_SEP} AC" || bat_state+=" ${G_SEP} battery"
+      break
+    done
+    break
+  done
+}
+
+collect_darwin() {
+  local prod ver build
+  prod="$(cmd1 sw_vers -productName)"; ver="$(cmd1 sw_vers -productVersion)"
+  build="$(cmd1 sw_vers -buildVersion)"
+  os_name="${prod:-macOS}${ver:+ $ver}${build:+ ($build)}"
+  kernel="$(cmd1 uname -r)"
+
+  # kern.boottime looks like: { sec = 1690000000, usec = 0 } ...
+  local bt now
+  bt="$(sysctl_n kern.boottime)"; bt="${bt#*sec = }"; bt="${bt%%,*}"
+  now="$(cmd1 date +%s)"
+  [[ -n "$bt" && -n "$now" && "$bt" != *[!0-9]* ]] && uptime_s=$(( now - bt ))
+
+  machine="$(sysctl_n hw.model)"
+  cpu_model="$(sysctl_n machdep.cpu.brand_string)"
+  cores="$(sysctl_n hw.physicalcpu)"; cores="${cores:-0}"
+  threads="$(sysctl_n hw.logicalcpu)"; threads="${threads:-0}"
+  local hz; hz="$(sysctl_n hw.cpufrequency)"
+  [[ -n "$hz" && "$hz" != *[!0-9]* ]] && clock_mhz=$(( hz / 1000000 ))
+
+  local bytes; bytes="$(sysctl_n hw.memsize)"
+  [[ -n "$bytes" && "$bytes" != *[!0-9]* ]] && mem_total=$(( bytes / 1024 ))
+
+  # vm_stat reports pages; anything not free/inactive/speculative counts
+  # as in use, which mirrors what Activity Monitor shows.
+  if have vm_stat; then
+    local psize=4096 active=0 wired=0 compressed=0 line n
+    psize="$(sysctl_n hw.pagesize)"; psize="${psize:-4096}"
+    while IFS= read -r line; do
+      n="${line##*:}"; n="${n//[^0-9]/}"
+      case "$line" in
+        "Pages active"*)              active="${n:-0}" ;;
+        "Pages wired down"*)          wired="${n:-0}" ;;
+        "Pages occupied by compressor"*) compressed="${n:-0}" ;;
+      esac
+    done < <(vm_stat 2>/dev/null)
+    mem_used=$(( (active + wired + compressed) * psize / 1024 ))
+  fi
+
+  local la
+  la="$(sysctl_n vm.loadavg)"; la="${la//[{}]/}"
+  [[ -n "$la" ]] && load_txt="$(printf '%s' "$la" | tr -s ' ' | sed 's/^ //')"
+  proc_count="$(sysctl_n kern.proc_count)"
+
+  # pmset is the documented interface; its first battery line carries
+  # both the percentage and the charging state.
+  if have pmset; then
+    local pl
+    pl="$(pmset -g batt 2>/dev/null | tr '\n' ' ')"
+    if [[ "$pl" == *%* ]]; then
+      local p="${pl#*	}"; p="${pl%%\%*}"; p="${p##* }"
+      [[ -n "$p" && "$p" != *[!0-9]* ]] && bat_pct="$p"
+      case "$pl" in
+        *"AC Power"*)      bat_state="AC" ;;
+        *"Battery Power"*) bat_state="battery" ;;
+      esac
+    fi
+  fi
+}
+
+collect_bsd() {
+  os_name="$(cmd1 uname -sr)"
+  kernel="$(cmd1 uname -r)"
+  machine="$(sysctl_n hw.model)"
+  cpu_model="$(sysctl_n hw.model)"
+  threads="$(sysctl_n hw.ncpu)"; threads="${threads:-0}"; cores=$threads
+  local bytes; bytes="$(sysctl_n hw.physmem)"
+  [[ -n "$bytes" && "$bytes" != *[!0-9]* ]] && mem_total=$(( bytes / 1024 ))
+  local la; la="$(sysctl_n vm.loadavg)"; la="${la//[{}]/}"
+  [[ -n "$la" ]] && load_txt="$la"
+}
+
+case "$OS" in
+  Linux)               collect_linux ;;
+  Darwin)              collect_darwin ;;
+  FreeBSD|OpenBSD|NetBSD|DragonFly) collect_bsd ;;
+  *)                   collect_bsd ;;   # best effort on anything else
+esac
+
+# ── Header ─────────────────────────────────────────────────────────
+host="$(slurp /proc/sys/kernel/hostname)"
+[[ -z "$host" ]] && host="$(cmd1 uname -n)"
+[[ -z "$host" ]] && host="${HOST:-${HOSTNAME:-unknown}}"
+user="${USER:-${LOGNAME:-$(id -un 2>/dev/null)}}"
+arch="$(cmd1 uname -m)"
+
+line1="${user}@${host}"
+line2="${os_name:-$OS}"
+[[ -n "$arch"     ]] && line2+=" ${G_SEP} $arch"
+[[ -n "$uptime_s" ]] && line2+=" ${G_SEP} up $(hsecs "$uptime_s")"
+
+inner=$(( W - 2 ))
+(( ${#line1} > inner )) && line1="${line1:0:inner}"
+(( ${#line2} > inner )) && line2="${line2:0:inner}"
+
+# Pad by CHARACTER count computed here, then apply with rep(). bash's
+# `printf %-*s` pads to a BYTE width, so a multibyte glyph anywhere in
+# the text would shorten the line and leave the frame ragged.
+box_row() {
+  local text=$1 style=$2
+  local fill=$(( inner - ${#text} ))
+  (( fill < 0 )) && fill=0
+  printf '  %s%s%s %s%s%s%s %s%s%s\n' \
+    "$MAG" "$G_V" "$R" "$style" "$text" "$R" "$(rep ' ' $fill)" "$MAG" "$G_V" "$R"
+}
+
+printf '\n  %s%s%s%s%s\n' "$MAG" "$G_TL" "$(rep "$G_H" $(( inner + 2 )))" "$G_TR" "$R"
+box_row "$line1" "$B"
+box_row "$line2" "$D"
+printf '  %s%s%s%s%s\n'   "$MAG" "$G_BL" "$(rep "$G_H" $(( inner + 2 )))" "$G_BR" "$R"
+
+# ── SYSTEM ─────────────────────────────────────────────────────────
+hr "SYSTEM"
+kv "Kernel" "$kernel"
+
+if   [[ -n "${ZSH_VERSION:-}"  ]]; then shell_desc="zsh $ZSH_VERSION"
+elif [[ -n "${BASH_VERSION:-}" ]]; then shell_desc="bash ${BASH_VERSION%%(*}"
+else                                    shell_desc="${SHELL##*/}"
+fi
+kv "Shell" "$shell_desc"
+
+desktop="${XDG_CURRENT_DESKTOP:-}"
+desktop="${desktop#*:}"                       # "ubuntu:GNOME" → "GNOME"
+[[ "$OS" == Darwin && -z "$desktop" ]] && desktop="Aqua"
+[[ -n "${XDG_SESSION_TYPE:-}" ]] && desktop="${desktop:+$desktop ${G_SEP} }${XDG_SESSION_TYPE}"
+kv "Desktop" "$desktop"
+kv "Terminal" "${TERM_PROGRAM:-${TERM:-}}"
+kv "Packages" "$pkgs"
+
+# ── HARDWARE ───────────────────────────────────────────────────────
+hr "HARDWARE"
+kv "Machine" "$machine"
+[[ -n "$bios" ]] && kv "BIOS" "$bios"
+
+for junk in '(R)' '(TM)' '(tm)' ' CPU' ' Processor'; do
+  cpu_model="${cpu_model//$junk/}"
+done
+# Drop the "@ 1.80GHz" base clock baked into the model string: the live
+# average below is the useful figure, and showing both invites the
+# reader to wonder which one is real.
+cpu_model="${cpu_model%% @ *}"
+cpu_model="${cpu_model//  / }"; cpu_model="${cpu_model# }"
+(( cores == 0 )) && cores=$threads
+cpu_desc="$cpu_model"
+(( threads )) && cpu_desc+=" ${D}${G_SEP} ${cores}C/${threads}T${R}"
+(( clock_mhz )) && cpu_desc+=" ${D}${G_SEP} $(( clock_mhz / 1000 )).$(( (clock_mhz % 1000) / 100 )) GHz${R}"
+kv "CPU" "$cpu_desc"
+
+# GPU, resolved from the PCI vendor:device pair against the system's
+# pci.ids — a plain text table that ships with hwdata. Linux only; macOS
+# does not expose an equivalent without third-party tooling.
+if [[ "$OS" == Linux ]]; then
+  pci_ids=''
+  for p in /usr/share/hwdata/pci.ids /usr/share/misc/pci.ids; do
+    [[ -r "$p" ]] && { pci_ids="$p"; break; }
+  done
+
+  lookup_pci() {
+    local pair=$1 vid did
+    vid="${pair%%:*}"; did="${pair##*:}"
+    [[ -n "$pci_ids" ]] && have awk || return
+    awk -v v="${vid,,}" -v d="${did,,}" '
+      /^#/        { next }
+      /^[0-9a-f]/ { invendor = (tolower($1) == v); next }
+      invendor && /^\t[0-9a-f]/ {
+        line = $0; sub(/^\t/, "", line)
+        if (tolower(substr(line, 1, 4)) == d) {
+          sub(/^[0-9a-f]+[ \t]+/, "", line); print line; exit
+        }
+      }
+    ' "$pci_ids" 2>/dev/null
+  }
+
+  gpu_list=()
+  for card in /sys/class/drm/card[0-9]*; do
+    [[ -r "$card/device/uevent" ]] || continue
+    pci_id=''
+    while IFS='=' read -r k v; do [[ "$k" == PCI_ID ]] && pci_id="$v"; done < "$card/device/uevent"
+    [[ -n "$pci_id" ]] || continue
+    name="$(lookup_pci "$pci_id")"
+    # Marketing names are usually bracketed: "Kaby Lake-R GT2 [UHD
+    # Graphics 620]" reads better as the bracketed part alone.
+    [[ "$name" == *'['*']'* ]] && { name="${name##*[}"; name="${name%]}"; }
+    gpu_list+=( "${name:-PCI $pci_id}" )
+  done
+  if (( ${#gpu_list[@]} )); then
+    if have sort; then
+      while IFS= read -r g; do [[ -n "$g" ]] && kv "GPU" "$g"; done \
+        < <(printf '%s\n' "${gpu_list[@]}" | sort -u)
+    else
+      kv "GPU" "${gpu_list[0]}"
+    fi
+  fi
+
+  modes=()
+  for st in /sys/class/drm/*/status; do
+    [[ "$(slurp "$st")" == connected ]] || continue
+    m="$(slurp "${st%/status}/modes")"
+    [[ -n "$m" ]] && modes+=( "$m" )
+  done
+  if (( ${#modes[@]} )); then
+    disp="${modes[0]}"
+    (( ${#modes[@]} > 1 )) && disp+=" ${D}${G_SEP} ${#modes[@]} outputs${R}"
+    kv "Display" "$disp"
+  fi
+fi
+
+# ── MEMORY ─────────────────────────────────────────────────────────
+hr "MEMORY"
+if (( mem_total > 0 )); then
+  meter "RAM" $(( mem_used * 100 / mem_total )) "$(hpair "$mem_used" "$mem_total")"
+else
+  kv "RAM" ""
+fi
+if (( swap_total > 0 )); then
+  meter "Swap" $(( swap_used * 100 / swap_total )) "$(hpair "$swap_used" "$swap_total")"
+elif [[ "$OS" == Linux ]]; then
+  kv "Swap" "${D}none configured${R}"
+fi
+
+# ── STORAGE ────────────────────────────────────────────────────────
+hr "STORAGE"
+if have df; then
+  declare -A seen_dev=()
+  any=0
+  # Linux has /proc/mounts; elsewhere ask df itself which filesystems
+  # exist, since there is no portable mount table to read.
+  if [[ -r /proc/mounts ]]; then
+    mount_src=/proc/mounts
+  else
+    mount_src=''
+  fi
+
+  scan_mount() {
+    local dev=$1 mnt=$2
+    [[ -n "${seen_dev[$dev]:-}" ]] && return
+    seen_dev[$dev]=1
+    local _ size used pcent
+    read -r _ size used _ pcent _ < <(df -P -k "$mnt" 2>/dev/null | tail -n +2)
+    [[ -z "${size:-}" || "${pcent:-}" != *% ]] && return
+    local pct="${pcent%\%}"
+    [[ "$pct" == *[!0-9]* ]] && return
+    local label="$mnt"
+    (( ${#label} > LABEL_W )) && label="…${label: -$(( LABEL_W - 1 ))}"
+    (( unicode )) || { label="$mnt"; (( ${#label} > LABEL_W )) && label="${label: -$LABEL_W}"; }
+    meter "$label" "$pct" "$(hpair "$used" "$size")"
+    any=1
+  }
+
+  if [[ -n "$mount_src" ]]; then
+    while read -r dev mnt fstype _; do
+      case "$fstype" in
+        ext2|ext3|ext4|xfs|btrfs|f2fs|zfs|vfat|exfat|ntfs|ntfs3) ;;
+        *) continue ;;
+      esac
+      scan_mount "$dev" "$mnt"
+    done < "$mount_src"
+  else
+    while read -r dev _ _ _ _ mnt; do
+      [[ "$dev" == /dev/* ]] || continue
+      scan_mount "$dev" "$mnt"
+    done < <(df -P -k 2>/dev/null | tail -n +2)
+  fi
+  (( any )) || kv "Disks" ""
+else
+  kv "Disks" "${D}df unavailable${R}"
+fi
+
+# ── STATUS ─────────────────────────────────────────────────────────
+hr "STATUS"
+if [[ -n "$load_txt" ]]; then
+  # Trim so the separator does not end up doubly spaced: load_txt is
+  # column-padded, and extra already carries its own leading separator.
+  load_txt="${load_txt%"${load_txt##*[![:space:]]}"}"
+  extra=''
+  [[ -n "$proc_count" ]] && extra+=" ${G_SEP} ${proc_count} procs"
+  (( threads )) && extra+=" ${G_SEP} ${threads} threads"
+  kv "Load" "$load_txt${D}${extra}${R}"
+fi
+
+if [[ -n "$temp_c" ]]; then
+  if   (( temp_c >= 85 )); then tcol=$RED
+  elif (( temp_c >= 70 )); then tcol=$YEL
+  else                          tcol=$GRN
+  fi
+  kv "Temperature" "${tcol}${temp_c}${G_DEG}${R}"
+fi
+
+[[ -n "$bat_pct" ]] && meter "Battery" "$bat_pct" "${bat_state:-unknown}"
+
+# ── Network ────────────────────────────────────────────────────────
+# Linux exposes routes and addresses as files. Elsewhere there is no
+# portable equivalent that avoids third-party tooling, so the section is
+# limited to what the platform actually offers.
+if [[ "$OS" == Linux ]]; then
+  default_iface=''
+  if [[ -r /proc/net/route ]]; then
+    while read -r iface dest _; do
+      [[ "$dest" == "00000000" ]] && { default_iface="$iface"; break; }
+    done < <(tail -n +2 /proc/net/route 2>/dev/null)
+  fi
+
+  # Locally-assigned IPv4s: in /proc/net/fib_trie an address appears on
+  # the line immediately before its "/32 host LOCAL" marker.
+  declare -a local_ips=()
+  if [[ -r /proc/net/fib_trie ]]; then
+    prev=''
+    while IFS= read -r line; do
+      if [[ "$line" == *"/32 host"* ]]; then
+        cand="${prev##*|-- }"; cand="${cand// /}"
+        [[ -n "$cand" && "$cand" != 127.* && "$cand" != 0.0.0.0 ]] && local_ips+=( "$cand" )
+      fi
+      prev="$line"
+    done < /proc/net/fib_trie
+  fi
+
+  # /proc/net/route stores addresses as little-endian hex: "0001A8C0"
+  # is the bytes 00 01 A8 C0, i.e. 192.168.1.0.
+  hex_le_int() { printf '%d' $(( 0x${1:6:2} << 24 | 0x${1:4:2} << 16 | 0x${1:2:2} << 8 | 0x${1:0:2} )); }
+  dotted_int() { local IFS=.; local -a o=($1); printf '%d' $(( o[0] << 24 | o[1] << 16 | o[2] << 8 | o[3] )); }
+
+  # Keep the address inside the default route's subnet. Taking the
+  # first address found is wrong on any machine running containers:
+  # docker and lxc bridges own addresses too, and one of those would
+  # otherwise be reported as "your IP".
+  primary_ip=''
+  if [[ -n "$default_iface" && ${#local_ips[@]} -gt 0 && -r /proc/net/route ]]; then
+    while read -r rif rdest _ _ _ _ _ rmask _; do
+      [[ "$rif" == "$default_iface" && "$rdest" != "00000000" ]] || continue
+      net=$(hex_le_int "$rdest"); msk=$(hex_le_int "$rmask")
+      for ip in "${local_ips[@]}"; do
+        [[ "$ip" == *[!0-9.]* ]] && continue
+        (( ($(dotted_int "$ip") & msk) == net )) && { primary_ip="$ip"; break 2; }
+      done
+    done < <(tail -n +2 /proc/net/route 2>/dev/null)
+  fi
+  [[ -z "$primary_ip" && ${#local_ips[@]} -gt 0 ]] && primary_ip="${local_ips[0]}"
+
+  virtual=0; shown=0
+  for iface in /sys/class/net/*; do
+    name="${iface##*/}"
+    [[ "$name" == lo ]] && continue
+    [[ "$(slurp "$iface/operstate")" == up ]] || continue
+    if (( ! show_all )); then
+      case "$name" in
+        veth*|docker*|br-*|virbr*|vmnet*|tun*|tap*|cni*|flannel*)
+          (( virtual++ )); continue ;;
+      esac
+    fi
+    detail="$name"
+    if [[ "$name" == "$default_iface" ]]; then
+      [[ -n "$primary_ip" ]] && detail+=" ${D}${G_SEP}${R} ${primary_ip}"
+      detail+=" ${D}${G_SEP} default route${R}"
+    fi
+    spd="$(slurp "$iface/speed")"
+    [[ -n "$spd" && "$spd" != *[!0-9]* ]] && (( spd > 0 )) && detail+=" ${D}${G_SEP} ${spd} Mb/s${R}"
+    kv "Network" "${GRN}${G_UP}${R} $detail"
+    shown=1
+  done
+  (( shown )) || kv "Network" "${D}no active interface${R}"
+  (( virtual )) && kv "" "${D}+ ${virtual} virtual (docker/bridge) ${G_SEP} see --all${R}"
+fi
+
+printf '\n'

@@ -350,6 +350,58 @@ else
   pass "not a git checkout — hygiene checks skipped"
 fi
 
+# ── 10. Shipped commands ───────────────────────────────────────────
+# Anything in bin/ lands on $PATH for every shell, so a syntax error or
+# a crash there is felt immediately and everywhere.
+section "10. Commands in bin/"
+shopt -s nullglob
+bins=( "$PROFILE_DIR"/bin/* )
+shopt -u nullglob
+
+if (( ${#bins[@]} == 0 )); then
+  pass "no shipped commands to check"
+fi
+
+for bin in "${bins[@]}"; do
+  name="${bin##*/}"
+  [[ -x "$bin" ]] || fail "$name is not executable (it is on \$PATH)"
+
+  if head -1 "$bin" | grep -q 'bash'; then
+    if err="$(bash -n "$bin" 2>&1)"; then
+      pass "$name parses"
+    else
+      fail "$name has a syntax error: $err"
+    fi
+  fi
+
+  # It must survive every rendering mode, including the degraded ones:
+  # piped output, no colour, and a terminal with no UTF-8.
+  for mode in "" "--no-color" "--ascii" "--no-color --ascii"; do
+    if timeout 20 "$bin" $mode >/dev/null 2>&1; then
+      pass "$name runs${mode:+ with ${mode}}"
+    else
+      fail "$name exited non-zero${mode:+ with ${mode}}"
+    fi
+  done
+
+  # A report that silently prints nothing is a failure the exit status
+  # would not catch.
+  lines="$(timeout 20 "$bin" --no-color 2>/dev/null | grep -c .)"
+  if (( lines >= 10 )); then
+    pass "$name produced $lines lines of output"
+  else
+    fail "$name produced only $lines lines — expected a full report"
+  fi
+
+  # ASCII mode exists so non-UTF-8 terminals stay readable; if any
+  # multibyte glyph leaks through, it defeats the point.
+  if timeout 20 "$bin" --ascii --no-color 2>/dev/null | LC_ALL=C grep -q '[^[:print:][:space:]]'; then
+    fail "$name emits non-ASCII bytes in --ascii mode"
+  else
+    pass "$name is pure ASCII in --ascii mode"
+  fi
+done
+
 # ── Summary ────────────────────────────────────────────────────────
 printf '\n────────────────────────────────────────\n'
 summary="$pass_count passed"

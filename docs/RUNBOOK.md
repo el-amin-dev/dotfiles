@@ -38,6 +38,21 @@ exec zsh                 # reload the shell cleanly (also aliased: reload)
 zshconf                  # open this config repo in $EDITOR (also: zshrc)
 ```
 
+Commands shipped by this repo live in `zshprofile/bin/`, which `00-env.zsh` puts on `$PATH`:
+
+```bash
+my-computer              # hardware, software and live status report
+my-computer --all        # include docker/veth/bridge interfaces
+my-computer --ascii      # ASCII frame and meters (non-UTF-8 terminals)
+my-computer --no-color   # plain text, also automatic when piped
+my-computer --width 80   # override the auto-detected width
+my-computer --help
+```
+
+`my-computer` needs no system-info package: it reads `/proc`, `/sys` and `/etc/os-release` on Linux,
+and `sysctl`/`sw_vers`/`vm_stat`/`pmset` on macOS. Anything the platform will not report shows as a
+dash rather than failing the report.
+
 Machine-specific settings that must not be committed go in a git-ignored file, sourced last so it
 wins over every module:
 
