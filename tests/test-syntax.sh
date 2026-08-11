@@ -494,6 +494,41 @@ if [[ -x "$asc" ]]; then
   fi
 fi
 
+# The Shell row must name the USER's shell, not this script's
+# interpreter. my-computer has a bash shebang, so $BASH_VERSION is
+# always set inside it — trusting that reported "bash" to a zsh user.
+if [[ -x "$mc" ]] && command -v zsh >/dev/null 2>&1; then
+  shellrow="$(zsh -c "'$mc' --no-banner --no-color --width 60 | grep -m1 Shell; :" 2>/dev/null)"
+  if [[ "$shellrow" == *zsh* ]]; then
+    pass "Shell row reports the calling shell, not the script's interpreter"
+  else
+    fail "Shell row wrong when invoked from zsh: $(printf '%s' "$shellrow" | tr -s ' ')"
+  fi
+fi
+
+# Width detection is the basis of the whole layout, and $COLUMNS is NOT
+# exported by interactive shells — so a child process must not rely on
+# it alone. With COLUMNS unset the report has to find the width some
+# other way rather than silently collapsing to the fallback.
+if [[ -x "$mc" ]]; then
+  if grep -q 'stty size' "$mc" && grep -q 'tput cols' "$mc"; then
+    pass "width detection falls back beyond \$COLUMNS"
+  else
+    fail "width detection relies on \$COLUMNS alone, which children never see"
+  fi
+fi
+
+# Truncation must not eat a whole field: the identity line drops trailing
+# parts instead, and STATUS packs onto more lines.
+if [[ -x "$mc" ]]; then
+  if timeout 25 "$mc" --no-banner --no-color --width 200 </dev/null 2>/dev/null \
+       | grep -qE 'batter…|battery …'; then
+    fail "STATUS truncated the battery reading instead of wrapping"
+  else
+    pass "STATUS wraps rather than truncating"
+  fi
+fi
+
 # The layout is the feature: it must genuinely reflow, not just survive.
 if [[ -x "$mc" ]]; then
   for spec in "50:1" "76:2" "118:3"; do
