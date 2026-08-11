@@ -6,27 +6,40 @@
 #  Facts come from the operating system's own interfaces:
 #
 #    Linux   /etc/os-release · /proc/{cpuinfo,meminfo,uptime,loadavg}
-#            /proc/{mounts,net/route,net/fib_trie} · /sys/class/*
-#            /sys/devices/virtual/dmi/id/* · /var/lib/dpkg/info/*.list
+#            /proc/{mounts,net/route,net/fib_trie,net/wireless}
+#            /sys/class/{net,drm,power_supply,thermal,hwmon,bluetooth}
+#            /sys/class/rfkill · /sys/block · /sys/bus/usb
+#            /sys/devices/virtual/dmi/id · /var/lib/dpkg/info/*.list
 #    macOS   sw_vers · sysctl · vm_stat · pmset      (all part of macOS)
 #    BSD     sysctl · /etc/os-release where present
 #
-#  ── Portability ───────────────────────────────────────────────────
-#  Runs anywhere zsh does, and adapts rather than failing:
+#  ── Responsive layout ─────────────────────────────────────────────
+#  The report is a set of panels laid out in as many columns as the
+#  terminal can actually hold, recomputed on every run — so widening
+#  the window or zooming out reflows it instead of leaving empty space,
+#  and narrowing it degrades to a single column instead of wrapping.
 #
-#    • Linux, macOS and the BSDs each have their own collectors; any
-#      fact the platform will not give up is shown as "—".
+#    < 74 cols     1 column
+#    74–113        2 columns
+#    ≥ 114         3 columns
+#
+#  Panel order is by importance, because in a narrow terminal the last
+#  ones are the ones scrolled off: ATTENTION, SYSTEM, HARDWARE, MEMORY,
+#  STORAGE, NETWORK, DEVICES, STATUS. ATTENTION and STATUS span the
+#  full width; the rest flow into the grid.
+#
+#  ── Portability ───────────────────────────────────────────────────
+#    • Linux, macOS and the BSDs have their own collectors; anything a
+#      platform will not report shows as "—" rather than failing.
+#    • No bash 4 features, so the system bash on macOS (3.2) is fine.
 #    • Non-UTF-8 terminals get an ASCII frame and meters automatically
-#      (forced with --ascii), so nothing turns into mojibake over a
-#      serial console or in a minimal container.
-#    • Colour is dropped when piped, when $NO_COLOR is set, or with
-#      --no-color. The layout is identical either way.
-#    • Width follows $COLUMNS, clamped to stay readable.
+#      (forced with --ascii), so nothing becomes mojibake on a serial
+#      console or in a minimal container.
+#    • Colour drops when piped, under $NO_COLOR, or with --no-color.
 #
 #  ── External commands, and why each is safe to rely on ────────────
 #  Arithmetic, string handling and padding use shell builtins only.
-#  The few external programs are base-system tools on their platform,
-#  never third-party packages:
+#  The externals are base-system tools, never third-party packages:
 #
 #    uname            everywhere    platform and architecture
 #    df               everywhere    filesystem usage — needs statfs(2),
@@ -37,27 +50,27 @@
 #    sysctl vm_stat   macOS/BSD     CPU, memory, uptime
 #    sw_vers pmset    macOS         product version, battery
 #
-#  Every one is probed with `have` before use; a missing tool costs one
-#  line of output, never the report.
+#  Optional, used only if already present, never required:
+#    iw / nmcli       the Wi-Fi SSID. Signal strength comes from
+#                     /proc/net/wireless and needs neither.
 #
-#  Usage:  my-computer [--no-color] [--ascii] [--width N] [--all] [--help]
+#  Usage:
+#    my-computer [--all] [--columns N] [--width N]
+#                [--ascii] [--no-color] [--no-banner] [--banner TEXT]
 #
-#      --all     also list virtual interfaces (docker, veth, bridges),
-#                which are collapsed to a count by default
+#      --all        verbose: virtual interfaces, idle swap, locale,
+#                   reclaimable cache, every USB device
+#      --columns N  force the column count instead of measuring
 # ════════════════════════════════════════════════════════════════════
 set -uo pipefail
+shopt -s extglob 2>/dev/null || true
 
 have() { command -v "$1" >/dev/null 2>&1; }
-
 OS="$(uname -s 2>/dev/null || printf 'Unknown')"
 
-# ── Options and capabilities ───────────────────────────────────────
-use_color=1
-show_all=0
-width_opt=0
-force_ascii=0
-show_banner=1
-banner_override=''
+# ── Options ────────────────────────────────────────────────────────
+use_color=1; show_all=0; width_opt=0; force_ascii=0
+show_banner=1; banner_override=''; col_opt=0
 
 [[ -t 1 ]] || use_color=0
 [[ -n "${NO_COLOR:-}" ]] && use_color=0
@@ -70,6 +83,7 @@ while (( $# )); do
     --no-banner) show_banner=0 ;;
     --banner)    shift; banner_override="${1:-}" ;;
     --width)     shift; width_opt="${1:-0}" ;;
+    --columns)   shift; col_opt="${1:-0}" ;;
     -h|--help)
       while IFS= read -r l; do
         [[ "$l" == '#'* ]] || break
@@ -81,9 +95,7 @@ while (( $# )); do
   shift
 done
 
-# Box-drawing and meter glyphs exist only in UTF-8. A terminal in a
-# C/POSIX or 8-bit locale renders them as replacement characters, which
-# looks far worse than plain ASCII — so detect and step down.
+# ── Capabilities ───────────────────────────────────────────────────
 unicode=1
 (( force_ascii )) && unicode=0
 case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
@@ -93,71 +105,78 @@ esac
 
 if (( unicode )); then
   G_TL='╭' G_TR='╮' G_BL='╰' G_BR='╯' G_H='─' G_V='│'
-  G_FULL='█' G_EMPTY='░' G_UP='▲' G_SEP='·' G_DEG='°C' G_DASH='—'
+  G_FULL='█' G_EMPTY='░' G_UP='▲' G_SEP='·' G_DEG='°C' G_DASH='—' G_DOT='●'
+  G_ML='├' G_MR='┤'
 else
-  # G_SEP is deliberately NOT '|': the frame already uses that glyph, and
-  # an inline '|' inside the header box reads as a broken border.
+  # G_SEP is deliberately not '|': the frame uses that glyph, and an
+  # inline '|' inside a panel reads as a broken border.
   G_TL='+' G_TR='+' G_BL='+' G_BR='+' G_H='-' G_V='|'
-  G_FULL='#' G_EMPTY='.' G_UP='*' G_SEP='-' G_DEG='C' G_DASH='-'
+  G_FULL='#' G_EMPTY='.' G_UP='!' G_SEP='-' G_DEG='C' G_DASH='-' G_DOT='*'
+  G_ML='+' G_MR='+'
 fi
 
-# Palette: ONE accent, plus dim, plus three status colours. Nothing
-# else. A second decorative hue competes with the accent for attention
-# and the eye stops knowing which one means "look here".
+# One accent, plus dim, plus three status colours. A second decorative
+# hue competes with the accent and the eye stops knowing where to look.
 if (( use_color )); then
   R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
-  RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'
-  ACC=$'\033[36m'                   # the single accent: rules + banner
+  RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; ACC=$'\033[36m'
 else
   R='' B='' D='' RED='' GRN='' YEL='' ACC=''
 fi
 
-# ── Layout ─────────────────────────────────────────────────────────
+# ── Responsive layout ──────────────────────────────────────────────
 if (( width_opt > 0 )); then
   W=$width_opt
 else
   W=$(( ${COLUMNS:-0} - 4 ))
-  (( W <= 0 )) && W=72          # not a tty: pick a fixed, sane width
-  (( W > 72 )) && W=72
-  (( W < 46 )) && W=46
+  (( W <= 0 )) && W=72          # not a tty: assume a conventional width
+  (( W < 40 )) && W=40
 fi
-LABEL_W=13                       # sized to the longest label, "Temperature"
-BAR_W=16
-# Rules stop at the CONTENT width, not the terminal width. A rule drawn
-# out to 72 columns above rows that end near 53 reads as a heavy bar
-# with a ragged gap under it; matching the content keeps the section
-# heading attached to the rows it introduces.
-#   4 indent + label + 1 + bar + 1 + "100%" + 2 + "156.1 / 445.3 GiB"
-RULE_W=$(( 4 + LABEL_W + 1 + BAR_W + 1 + 4 + 2 + 18 ))
-(( RULE_W > W )) && RULE_W=$W
+
+GAP=2
+MINBOX=36                        # below this a two-column row stops being
+                                 # readable: labels and values collide
+if (( col_opt > 0 )); then
+  NCOL=$col_opt
+else
+  NCOL=1
+  while (( NCOL < 3 )); do
+    if (( (W - NCOL * GAP) / (NCOL + 1) >= MINBOX )); then
+      NCOL=$(( NCOL + 1 ))
+    else
+      break
+    fi
+  done
+fi
+BOXW=$(( (W - (NCOL - 1) * GAP) / NCOL ))
+(( BOXW > 60 )) && (( NCOL == 1 )) && BOXW=60   # one wide column still reads
+                                                # badly past ~60 columns
+FULLW=$(( BOXW * NCOL + (NCOL - 1) * GAP ))
+LW=10                             # label column inside a panel
+(( BOXW >= 44 )) && LW=12
 
 # ── Builtin-only helpers ───────────────────────────────────────────
 rep()   { local c=$1 n=$2 s=''; while (( n-- > 0 )); do s+="$c"; done; printf '%s' "$s"; }
 slurp() { local l; [[ -r "$1" ]] && IFS= read -r l < "$1" 2>/dev/null && printf '%s' "$l"; }
-
-# First line of a command's output, or empty. Keeps every platform
-# probe a one-liner that cannot leak an error message into the report.
-cmd1() { local o; o="$("$@" 2>/dev/null)" || return; printf '%s' "${o%%$'\n'*}"; }
-
+cmd1()  { local o; o="$("$@" 2>/dev/null)" || return; printf '%s' "${o%%$'\n'*}"; }
 sysctl_n() { have sysctl && cmd1 sysctl -n "$1"; }
+rtrim() { local s=$1; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 
-hr() {
-  # Two statements, not one `local`: bash expands every word of a
-  # `local` before performing any assignment, so ${#name} would read an
-  # unbound variable — fatal under `set -u`.
-  local name=$1
-  local pad=$(( RULE_W - ${#name} - 3 ))
-  (( pad < 0 )) && pad=0
-  printf '\n  %s%s%s %s%s%s\n' "$B$ACC" "$name" "$R" "$D" "$(rep "$G_H" $pad)" "$R"
+# Visible length: colour codes occupy no columns, so every width
+# calculation has to measure the text with them removed.
+strip_ansi() { local s=$1; printf '%s' "${s//$'\033'\[*([0-9;])m/}"; }
+vlen() { local s; s="$(strip_ansi "$1")"; printf '%d' "${#s}"; }
+
+# Truncate to a visible width. Colour is dropped when the text actually
+# has to be cut — keeping it would mean splitting an escape sequence.
+vfit() {
+  local s=$1 want=$2 plain
+  plain="$(strip_ansi "$s")"
+  if (( ${#plain} <= want )); then printf '%s' "$s"; return; fi
+  (( want <= 1 )) && { printf '%s' "${plain:0:want}"; return; }
+  printf '%s%s' "${plain:0:$(( want - 1 ))}" "${unicode:+…}"
 }
 
-kv() {
-  local label=$1 value=$2
-  [[ -z "${value//[[:space:]]/}" ]] && value="${D}${G_DASH}${R}"
-  printf '    %s%-*s%s %s\n' "$D" "$LABEL_W" "$label" "$R" "$value"
-}
-
-# KiB → human, one decimal from GiB up. Integer maths only.
 hkib() {
   local k=$1
   if   (( k >= 1048576 )); then printf '%d.%d GiB' $(( k / 1048576 )) $(( (k % 1048576) * 10 / 1048576 ))
@@ -166,8 +185,6 @@ hkib() {
   fi
 }
 
-# "used / total UNIT" — a single unit for the pair, chosen from the
-# total, so the two numbers can be compared without arithmetic.
 hpair() {
   local u=$1 t=$2
   if (( t >= 1048576 )); then
@@ -196,49 +213,109 @@ sev() {
   fi
 }
 
-# A meter row: bar, right-aligned percentage, then detail. The percent
-# sits between the two so a column of meters can be scanned vertically
-# without reading a single value.
-meter() {
-  local label=$1 pct=$2 detail=$3 filled
+# ════════════════════════════════════════════════════════════════════
+#  Panels
+#
+#  A panel is built row by row, then rendered to a fixed width and
+#  stashed. Rendering has to finish before anything prints, because
+#  panels sit SIDE BY SIDE: line 3 of the left panel and line 3 of the
+#  right one are emitted together.
+# ════════════════════════════════════════════════════════════════════
+PANELS=()        # rendered text, newline-joined
+PANEL_FULL=()    # 1 = spans every column
+
+_ptitle=''; _prows=(); _pw=0; _pfull=0
+
+panel_begin() { _ptitle="$1"; _pfull="${2:-0}"; _prows=(); }
+
+# Rows carry a unit separator between label and value so a value may
+# contain anything, spaces included.
+panel_row()  { _prows+=( "$1"$'\x1f'"$2" ); }
+panel_rule() { _prows+=( $'\x1e' ); }
+# Full-bleed text: no label column, so it may use the panel's whole
+# inner width. Continuation lines under a labelled row use panel_row
+# with an empty label instead, which keeps the indent.
+panel_text() { _prows+=( $'\x1d'"$1" ); }
+
+# A meter sized to the panel: bar, then the percentage. Detail goes on
+# a continuation line when the panel is too narrow to carry it inline,
+# which keeps the bars aligned in a column instead of ragged.
+panel_meter() {
+  local label=$1 pct=$2 detail=$3
   (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
-  filled=$(( pct * BAR_W / 100 ))
-  # Never an empty bar for a non-zero value, nor a full bar below 100 —
-  # both misread at a glance.
+  local avail=$(( _pw - 4 - LW - 1 ))     # inside borders, after label
+  local barw=$(( avail - 5 ))             # room for " 100%"
+  (( barw > 16 )) && barw=16
+  (( barw < 6 ))  && barw=6
+  local filled=$(( pct * barw / 100 ))
   (( filled == 0 && pct > 0 )) && filled=1
-  (( filled == BAR_W && pct < 100 )) && filled=$(( BAR_W - 1 ))
-  local bar="$(sev "$pct")$(rep "$G_FULL" $filled)$R$D$(rep "$G_EMPTY" $(( BAR_W - filled )))$R"
-  kv "$label" "$bar $(sev "$pct")$(printf '%3d%%' "$pct")$R  ${D}${detail}${R}"
+  (( filled == barw && pct < 100 )) && filled=$(( barw - 1 ))
+  local bar
+  bar="$(sev "$pct")$(rep "$G_FULL" $filled)$R$D$(rep "$G_EMPTY" $(( barw - filled )))$R"
+  local head
+  head="$bar $(sev "$pct")$(printf '%3d%%' "$pct")$R"
+  if (( avail - barw - 5 >= ${#detail} + 2 )); then
+    panel_row "$label" "$head  ${D}${detail}${R}"
+  else
+    panel_row "$label" "$head"
+    [[ -n "$detail" ]] && panel_row "" "${D}${detail}${R}"
+  fi
 }
 
-sep() { printf ' %s%s%s ' "$D" "$G_SEP" "$R"; }
+panel_end() {
+  local w=$_pw inner=$(( _pw - 2 )) out='' t=" $_ptitle " fill row label value line
+  fill=$(( inner - 1 - ${#t} ))
+  (( fill < 0 )) && fill=0
+  out="${ACC}${G_TL}${G_H}${B}${t}${R}${ACC}$(rep "$G_H" $fill)${G_TR}${R}"
 
-# ════════════════════════════════════════════════════════════════════
-#  Collectors — one implementation per platform, each setting the same
-#  variables. Anything a platform cannot answer stays empty and prints
-#  as a dash.
-# ════════════════════════════════════════════════════════════════════
-os_name='' kernel='' uptime_s='' pkgs='' machine='' bios='' chassis=''
+  for row in "${_prows[@]}"; do
+    if [[ "$row" == $'\x1e' ]]; then
+      out+=$'\n'"${ACC}${G_ML}${D}$(rep "$G_H" $inner)${R}${ACC}${G_MR}${R}"
+      continue
+    fi
+    if [[ "$row" == $'\x1d'* ]]; then
+      value="$(vfit "${row#$'\x1d'}" $(( inner - 4 )))"
+      line="  ${value}"
+      out+=$'\n'"${ACC}${G_V}${R}${line}$(rep ' ' $(( inner - $(vlen "$line") )))${ACC}${G_V}${R}"
+      continue
+    fi
+    label="${row%%$'\x1f'*}"; value="${row#*$'\x1f'}"
+    if [[ -n "$label" ]]; then
+      value="$(vfit "$value" $(( inner - 3 - LW )))"
+      line="  ${D}$(printf '%-*s' "$LW" "$label")${R} ${value}"
+    else
+      # Continuation / free text: indent past the label column so it
+      # reads as belonging to the row above.
+      value="$(vfit "$value" $(( inner - 3 - LW )))"
+      line="  $(rep ' ' $LW) ${value}"
+    fi
+    out+=$'\n'"${ACC}${G_V}${R}${line}$(rep ' ' $(( inner - $(vlen "$line") )))${ACC}${G_V}${R}"
+  done
+
+  out+=$'\n'"${ACC}${G_BL}$(rep "$G_H" $inner)${G_BR}${R}"
+  PANELS+=( "$out" )
+  PANEL_FULL+=( "$_pfull" )
+}
+
+# ── Collectors ─────────────────────────────────────────────────────
+os_name='' kernel='' uptime_s='' pkgs='' machine='' bios='' chassis='' brand=''
 cpu_model='' cores=0 threads=0 clock_mhz=0 clock_max_mhz=0
 mem_total=0 mem_used=0 mem_cached=0 swap_total=0 swap_used=0
 load_txt='' proc_count='' temp_c='' bat_pct='' bat_state='' bat_health=''
-brand=''
+wifi_if='' wifi_qual='' wifi_dbm='' wifi_ssid=''
+bt_present=0 bt_blocked=0 bt_conns=0
+gateway='' dns_txt='' primary_ip='' default_iface=''
+disk_pct=(); disks=(); removables=(); usb_names=(); nets=()
 
-# SMBIOS chassis codes. Worth naming: "10" tells you nothing, "Notebook"
-# tells you whether to expect a battery and thermal throttling.
 chassis_name() {
   case "$1" in
-    3)  printf 'Desktop' ;;      4)  printf 'Low Profile Desktop' ;;
-    5)  printf 'Pizza Box' ;;    6)  printf 'Mini Tower' ;;
-    7)  printf 'Tower' ;;        8)  printf 'Portable' ;;
-    9)  printf 'Laptop' ;;       10) printf 'Notebook' ;;
-    11) printf 'Hand Held' ;;    13) printf 'All In One' ;;
-    14) printf 'Sub Notebook' ;; 17) printf 'Main Server Chassis' ;;
-    18) printf 'Expansion Chassis' ;;
-    23) printf 'Rack Mount Chassis' ;;
-    30) printf 'Tablet' ;;       31) printf 'Convertible' ;;
-    32) printf 'Detachable' ;;
-    *)  printf '' ;;
+    3) printf 'Desktop';;      4) printf 'Low Profile';;  5) printf 'Pizza Box';;
+    6) printf 'Mini Tower';;   7) printf 'Tower';;        8) printf 'Portable';;
+    9) printf 'Laptop';;      10) printf 'Notebook';;    11) printf 'Hand Held';;
+   13) printf 'All In One';;  14) printf 'Sub Notebook';;
+   17) printf 'Server';;      23) printf 'Rack Mount';;
+   30) printf 'Tablet';;      31) printf 'Convertible';; 32) printf 'Detachable';;
+    *) printf '';;
   esac
 }
 
@@ -246,55 +323,47 @@ collect_linux() {
   if [[ -r /etc/os-release ]]; then
     while IFS='=' read -r k v; do
       v="${v%\"}"; v="${v#\"}"
-      case "$k" in
-        PRETTY_NAME) os_name="$v" ;;
-        # ID drives the banner: "ubuntu" → UBUNTU, the distro's own name,
-        # which is what a logo would have said.
-        ID)          brand="$v" ;;
-      esac
+      case "$k" in PRETTY_NAME) os_name="$v";; ID) brand="$v";; esac
     done < /etc/os-release
   fi
   kernel="$(slurp /proc/sys/kernel/osrelease)"
   read -r uptime_s _ < /proc/uptime 2>/dev/null || uptime_s=''
 
   if [[ -d /var/lib/dpkg/info ]]; then
-    # One .list per installed package. A glob, rather than parsing the
-    # status file, which also carries removed-but-not-purged entries.
+    # One .list per installed package — a glob, rather than parsing the
+    # status file, which also lists packages removed but not purged.
     shopt -s nullglob; local l=( /var/lib/dpkg/info/*.list ); shopt -u nullglob
-    (( ${#l[@]} )) && pkgs="${#l[@]} ${D}dpkg${R}"
-  elif [[ -d /var/lib/rpm ]] && have rpm; then
-    pkgs="$(cmd1 rpm -qa --qf '.') ${D}rpm${R}"
+    (( ${#l[@]} )) && pkgs="${#l[@]} dpkg"
   fi
 
-  local dmi=/sys/devices/virtual/dmi/id
-  local vendor product
+  local dmi=/sys/devices/virtual/dmi/id vendor product bv bd
   vendor="$(slurp $dmi/sys_vendor)"; product="$(slurp $dmi/product_name)"
   machine="$product"
   [[ -n "$vendor" && "$product" != "$vendor"* ]] && machine="$vendor $product"
-  local bv bd
   bv="$(slurp $dmi/bios_version)"; bd="$(slurp $dmi/bios_date)"
-  [[ -n "$bv" ]] && bios="$bv${bd:+ ${D}${G_SEP} ${bd}${R}}"
+  [[ -n "$bv" ]] && bios="$bv${bd:+ ${G_SEP} $bd}"
   chassis="$(chassis_name "$(slurp $dmi/chassis_type)")"
 
-  # Physical cores are the distinct (physical id, core id) pairs; that
-  # is what separates real cores from hyperthreads, which /proc/cpuinfo
-  # otherwise lists identically.
-  local -A seen=(); local phys='' core=''
+  # Physical cores are the distinct (physical id, core id) pairs — what
+  # separates real cores from hyperthreads, which /proc/cpuinfo lists
+  # identically. Tracked in a string, not an associative array, so this
+  # still runs under the bash 3.2 that macOS ships.
+  local seen=' ' phys='' core='' line
   while IFS= read -r line; do
     case "$line" in
       "model name"*)  [[ -z "$cpu_model" ]] && cpu_model="${line#*: }" ;;
-      processor*)     (( threads++ )) ;;
+      processor*)     threads=$(( threads + 1 )) ;;
       "physical id"*) phys="${line#*: }" ;;
-      "core id"*)     core="${line#*: }"; seen["$phys/$core"]=1 ;;
+      "core id"*)     core="${line#*: }"
+                      [[ "$seen" == *" $phys/$core "* ]] || { seen+="$phys/$core "; cores=$(( cores + 1 )); } ;;
     esac
   done < /proc/cpuinfo 2>/dev/null
-  cores=${#seen[@]}
 
   local sum=0 n=0 f k
   for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq; do
     [[ -r "$f" ]] || continue
     k="$(slurp "$f")"; [[ -z "$k" || "$k" == *[!0-9]* ]] && continue
-    sum=$(( sum + k )); (( n++ ))
+    sum=$(( sum + k )); n=$(( n + 1 ))
   done
   (( n )) && clock_mhz=$(( sum / n / 1000 ))
   k="$(slurp /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)"
@@ -305,8 +374,8 @@ collect_linux() {
     case "$key" in
       MemTotal:)     mem_total=$v ;;
       # Used = total - available, NOT total - free: "free" excludes the
-      # cache and buffers the kernel hands back on demand, which makes
-      # an ordinary system look nearly out of memory.
+      # cache the kernel returns on demand, which makes an ordinary
+      # system look nearly out of memory.
       MemAvailable:) mem_used=$v ;;
       Cached:)       cached=$v ;;
       Buffers:)      buffers=$v ;;
@@ -314,18 +383,15 @@ collect_linux() {
       SwapFree:)     swap_used=$v ;;
     esac
   done < /proc/meminfo 2>/dev/null
+  mem_used=$(( mem_total - mem_used )); swap_used=$(( swap_total - swap_used ))
   mem_cached=$(( cached + buffers ))
-  mem_used=$(( mem_total - mem_used ))
-  swap_used=$(( swap_total - swap_used ))
 
   if [[ -r /proc/loadavg ]]; then
     local a b c p
     read -r a b c p _ < /proc/loadavg
-    load_txt="$a  $b  $c"; proc_count="${p#*/}"
+    load_txt="$a $b $c"; proc_count="${p#*/}"
   fi
 
-  # Prefer a labelled package sensor: the generic ACPI zone is often a
-  # chassis reading and sometimes reports 0.
   local h t z
   for h in /sys/class/hwmon/hwmon*; do
     case "$(slurp "$h/name")" in
@@ -350,15 +416,13 @@ collect_linux() {
     bat_pct="$(slurp "$bat/capacity")"
     [[ -z "$bat_pct" || "$bat_pct" == *[!0-9]* ]] && { bat_pct=''; continue; }
     bat_state="$(slurp "$bat/status")"
-    # Wear: what the cell holds now against what it shipped with. This is
-    # the number that explains a laptop that suddenly stops lasting.
-    full="$(slurp "$bat/energy_full")";        design="$(slurp "$bat/energy_full_design")"
-    [[ -z "$full" ]] && full="$(slurp "$bat/charge_full")"
+    # Wear: what the cell holds now against what it shipped with. This
+    # is the number that explains a laptop that stopped lasting.
+    full="$(slurp "$bat/energy_full")"; design="$(slurp "$bat/energy_full_design")"
+    [[ -z "$full"   ]] && full="$(slurp "$bat/charge_full")"
     [[ -z "$design" ]] && design="$(slurp "$bat/charge_full_design")"
     if [[ -n "$full" && -n "$design" && "$full" != *[!0-9]* && "$design" != *[!0-9]* ]] \
-       && (( design > 0 )); then
-      bat_health=$(( full * 100 / design ))
-    fi
+       && (( design > 0 )); then bat_health=$(( full * 100 / design )); fi
     for a in /sys/class/power_supply/A{C,DP}*; do
       [[ -r "$a/online" ]] || continue
       [[ "$(slurp "$a/online")" == 1 ]] && bat_state+=" ${G_SEP} AC" || bat_state+=" ${G_SEP} battery"
@@ -366,485 +430,568 @@ collect_linux() {
     done
     break
   done
+
+  collect_linux_net
+  collect_linux_disks
+}
+
+collect_linux_net() {
+  local iface dest line name
+  if [[ -r /proc/net/route ]]; then
+    while read -r iface dest gw _; do
+      if [[ "$dest" == "00000000" ]]; then
+        default_iface="$iface"
+        # Gateway is little-endian hex, same encoding as the routes.
+        [[ "$gw" != "00000000" && ${#gw} == 8 ]] && \
+          gateway="$(( 0x${gw:6:2} )).$(( 0x${gw:4:2} )).$(( 0x${gw:2:2} )).$(( 0x${gw:0:2} ))"
+        break
+      fi
+    done < <(tail -n +2 /proc/net/route 2>/dev/null)
+  fi
+
+  # Locally-assigned IPv4s: in /proc/net/fib_trie an address sits on the
+  # line before its "/32 host LOCAL" marker.
+  local -a ips=(); local prev='' cand
+  if [[ -r /proc/net/fib_trie ]]; then
+    while IFS= read -r line; do
+      if [[ "$line" == *"/32 host"* ]]; then
+        cand="${prev##*|-- }"; cand="${cand// /}"
+        [[ -n "$cand" && "$cand" != 127.* && "$cand" != 0.0.0.0 ]] && ips+=( "$cand" )
+      fi
+      prev="$line"
+    done < /proc/net/fib_trie
+  fi
+  # Keep the address inside the default route's subnet. The first
+  # address found is the wrong answer on any machine running containers,
+  # where a docker or lxc bridge owns one too.
+  local rif rdest rmask net msk ip
+  if [[ -n "$default_iface" && ${#ips[@]} -gt 0 ]]; then
+    while read -r rif rdest _ _ _ _ _ rmask _; do
+      [[ "$rif" == "$default_iface" && "$rdest" != "00000000" ]] || continue
+      net=$(( 0x${rdest:6:2} << 24 | 0x${rdest:4:2} << 16 | 0x${rdest:2:2} << 8 | 0x${rdest:0:2} ))
+      msk=$(( 0x${rmask:6:2} << 24 | 0x${rmask:4:2} << 16 | 0x${rmask:2:2} << 8 | 0x${rmask:0:2} ))
+      for ip in "${ips[@]}"; do
+        [[ "$ip" == *[!0-9.]* ]] && continue
+        local o1 o2 o3 o4; IFS=. read -r o1 o2 o3 o4 <<< "$ip"
+        (( ((o1 << 24 | o2 << 16 | o3 << 8 | o4) & msk) == net )) && { primary_ip="$ip"; break 2; }
+      done
+    done < <(tail -n +2 /proc/net/route 2>/dev/null)
+  fi
+  [[ -z "$primary_ip" && ${#ips[@]} -gt 0 ]] && primary_ip="${ips[0]}"
+
+  local -a ns=()
+  while read -r k v _; do [[ "$k" == nameserver ]] && ns+=( "$v" ); done < /etc/resolv.conf 2>/dev/null
+  (( ${#ns[@]} )) && dns_txt="${ns[0]}"
+  (( ${#ns[@]} > 1 )) && dns_txt+=" +$(( ${#ns[@]} - 1 ))"
+
+  # Wi-Fi quality and signal come straight from /proc/net/wireless, so
+  # no wireless tooling is needed for the part that changes minute to
+  # minute. Only the SSID needs a helper, and it stays optional.
+  # /proc/net/wireless columns are:
+  #   iface:  status  link  level  noise  ...
+  # The status field sits between the name and the link quality; reading
+  # it as the quality is why this reported 0% while the link was fine.
+  # Values carry a trailing '.' that has to come off before arithmetic.
+  if [[ -r /proc/net/wireless ]]; then
+    local wname wstat wlink wlevel
+    while read -r wname wstat wlink wlevel _; do
+      [[ "$wname" == *: ]] || continue
+      wifi_if="${wname%:}"
+      wlink="${wlink%.}"; wlevel="${wlevel%.}"
+      # Link quality is reported against a 70-point scale.
+      [[ -n "$wlink"  && "$wlink"  != *[!0-9]*  ]] && wifi_qual=$(( wlink * 100 / 70 ))
+      [[ -n "$wlevel" && "$wlevel" != *[!0-9-]* ]] && wifi_dbm="$wlevel"
+      break
+    done < <(tail -n +3 /proc/net/wireless 2>/dev/null)
+  fi
+  if [[ -n "$wifi_if" ]]; then
+    if have iw;    then wifi_ssid="$(iw dev "$wifi_if" link 2>/dev/null | sed -n 's/.*SSID: //p' | head -1)"; fi
+    if [[ -z "$wifi_ssid" ]] && have nmcli; then
+      wifi_ssid="$(nmcli -t -f active,ssid dev wifi 2>/dev/null | sed -n 's/^yes://p' | head -1)"
+    fi
+  fi
+
+  # Bluetooth: the adapter is a directory, each live connection is a
+  # child of it, and rfkill says whether the radio is actually enabled.
+  local hci rk
+  for hci in /sys/class/bluetooth/hci[0-9]*; do
+    [[ -e "$hci" ]] || continue
+    case "${hci##*/}" in *:*) continue ;; esac
+    bt_present=1
+    break
+  done
+  if (( bt_present )); then
+    for hci in /sys/class/bluetooth/hci[0-9]*:*; do
+      [[ -e "$hci" ]] && bt_conns=$(( bt_conns + 1 ))
+    done
+    for rk in /sys/class/rfkill/rfkill*; do
+      [[ "$(slurp "$rk/type")" == bluetooth ]] || continue
+      [[ "$(slurp "$rk/soft")" == 1 || "$(slurp "$rk/hard")" == 1 ]] && bt_blocked=1
+      break
+    done
+  fi
+
+  local ifp nm
+  for ifp in /sys/class/net/*; do
+    nm="${ifp##*/}"
+    [[ "$nm" == lo ]] && continue
+    [[ "$(slurp "$ifp/operstate")" == up ]] || continue
+    nets+=( "$nm" )
+  done
+}
+
+collect_linux_disks() {
+  local b n rem size model vendor kind
+  for b in /sys/block/*; do
+    n="${b##*/}"
+    # loop devices are snap mounts, ram/zram are memory — neither is a
+    # disk anyone means when they ask what is plugged in.
+    case "$n" in loop*|ram*|zram*|dm-*|sr*) continue ;; esac
+    size="$(slurp "$b/size")"
+    [[ -z "$size" || "$size" == *[!0-9]* ]] && continue
+    (( size == 0 )) && continue
+    rem="$(slurp "$b/removable")"
+    model="$(slurp "$b/device/model")"
+    vendor="$(slurp "$b/device/vendor")"
+    # Trim the fixed-width padding the kernel keeps in these fields.
+    model="$(rtrim "${model## }")"; vendor="$(rtrim "${vendor## }")"
+    [[ -n "$vendor" && "$model" != "$vendor"* ]] && model="$vendor $model"
+    [[ -z "$model" ]] && model="$n"
+    if [[ "$(slurp "$b/queue/rotational")" == 1 ]]; then kind='HDD'; else kind='SSD'; fi
+    # size is in 512-byte sectors, so /2 gives KiB.
+    if [[ "$rem" == 1 ]]; then
+      removables+=( "$n"$'\x1f'"$model"$'\x1f'"$(( size / 2 ))" )
+    else
+      disks+=( "$n"$'\x1f'"$model ${G_SEP} $kind"$'\x1f'"$(( size / 2 ))" )
+    fi
+  done
+
+  local u p
+  for u in /sys/bus/usb/devices/*; do
+    p="$u/product"
+    [[ -r "$p" ]] || continue
+    n="$(slurp "$p")"
+    # Root hubs are the machine's own controllers, not anything plugged
+    # in, and listing them buries what is.
+    case "$n" in *"Host Controller"*|*"root hub"*) continue ;; esac
+    usb_names+=( "$(rtrim "${n## }")" )
+  done
 }
 
 collect_darwin() {
-  local prod ver build
+  local prod ver build bt now
   prod="$(cmd1 sw_vers -productName)"; ver="$(cmd1 sw_vers -productVersion)"
   build="$(cmd1 sw_vers -buildVersion)"
   os_name="${prod:-macOS}${ver:+ $ver}${build:+ ($build)}"
+  brand="${prod:-macos}"
   kernel="$(cmd1 uname -r)"
-
-  # kern.boottime looks like: { sec = 1690000000, usec = 0 } ...
-  local bt now
   bt="$(sysctl_n kern.boottime)"; bt="${bt#*sec = }"; bt="${bt%%,*}"
   now="$(cmd1 date +%s)"
   [[ -n "$bt" && -n "$now" && "$bt" != *[!0-9]* ]] && uptime_s=$(( now - bt ))
-
   machine="$(sysctl_n hw.model)"
   cpu_model="$(sysctl_n machdep.cpu.brand_string)"
   cores="$(sysctl_n hw.physicalcpu)"; cores="${cores:-0}"
   threads="$(sysctl_n hw.logicalcpu)"; threads="${threads:-0}"
-  local hz; hz="$(sysctl_n hw.cpufrequency)"
+  local hz bytes; hz="$(sysctl_n hw.cpufrequency)"
   [[ -n "$hz" && "$hz" != *[!0-9]* ]] && clock_mhz=$(( hz / 1000000 ))
-
-  local bytes; bytes="$(sysctl_n hw.memsize)"
+  bytes="$(sysctl_n hw.memsize)"
   [[ -n "$bytes" && "$bytes" != *[!0-9]* ]] && mem_total=$(( bytes / 1024 ))
-
-  # vm_stat reports pages; anything not free/inactive/speculative counts
-  # as in use, which mirrors what Activity Monitor shows.
   if have vm_stat; then
-    local psize=4096 active=0 wired=0 compressed=0 line n
+    local psize active=0 wired=0 comp=0 line n
     psize="$(sysctl_n hw.pagesize)"; psize="${psize:-4096}"
     while IFS= read -r line; do
       n="${line##*:}"; n="${n//[^0-9]/}"
       case "$line" in
-        "Pages active"*)              active="${n:-0}" ;;
-        "Pages wired down"*)          wired="${n:-0}" ;;
-        "Pages occupied by compressor"*) compressed="${n:-0}" ;;
+        "Pages active"*)                 active="${n:-0}" ;;
+        "Pages wired down"*)             wired="${n:-0}" ;;
+        "Pages occupied by compressor"*) comp="${n:-0}" ;;
       esac
     done < <(vm_stat 2>/dev/null)
-    mem_used=$(( (active + wired + compressed) * psize / 1024 ))
+    mem_used=$(( (active + wired + comp) * psize / 1024 ))
   fi
-
-  local la
-  la="$(sysctl_n vm.loadavg)"; la="${la//[{}]/}"
-  [[ -n "$la" ]] && load_txt="$(printf '%s' "$la" | tr -s ' ' | sed 's/^ //')"
+  local la; la="$(sysctl_n vm.loadavg)"; la="${la//[{}]/}"
+  [[ -n "$la" ]] && load_txt="$(rtrim "${la## }")"
   proc_count="$(sysctl_n kern.proc_count)"
-
-  # pmset is the documented interface; its first battery line carries
-  # both the percentage and the charging state.
   if have pmset; then
-    local pl
+    local pl p
     pl="$(pmset -g batt 2>/dev/null | tr '\n' ' ')"
     if [[ "$pl" == *%* ]]; then
-      local p="${pl#*	}"; p="${pl%%\%*}"; p="${p##* }"
+      p="${pl%%\%*}"; p="${p##* }"
       [[ -n "$p" && "$p" != *[!0-9]* ]] && bat_pct="$p"
-      case "$pl" in
-        *"AC Power"*)      bat_state="AC" ;;
-        *"Battery Power"*) bat_state="battery" ;;
-      esac
+      case "$pl" in *"AC Power"*) bat_state="AC" ;; *"Battery Power"*) bat_state="battery" ;; esac
     fi
   fi
 }
 
 collect_bsd() {
-  os_name="$(cmd1 uname -sr)"
-  kernel="$(cmd1 uname -r)"
-  machine="$(sysctl_n hw.model)"
-  cpu_model="$(sysctl_n hw.model)"
+  os_name="$(cmd1 uname -sr)"; kernel="$(cmd1 uname -r)"
+  brand="$(cmd1 uname -s)"
+  machine="$(sysctl_n hw.model)"; cpu_model="$machine"
   threads="$(sysctl_n hw.ncpu)"; threads="${threads:-0}"; cores=$threads
   local bytes; bytes="$(sysctl_n hw.physmem)"
   [[ -n "$bytes" && "$bytes" != *[!0-9]* ]] && mem_total=$(( bytes / 1024 ))
   local la; la="$(sysctl_n vm.loadavg)"; la="${la//[{}]/}"
-  [[ -n "$la" ]] && load_txt="$la"
+  [[ -n "$la" ]] && load_txt="$(rtrim "${la## }")"
 }
 
 case "$OS" in
-  Linux)               collect_linux ;;
-  Darwin)              collect_darwin ;;
-  FreeBSD|OpenBSD|NetBSD|DragonFly) collect_bsd ;;
-  *)                   collect_bsd ;;   # best effort on anything else
+  Linux)  collect_linux ;;
+  Darwin) collect_darwin ;;
+  *)      collect_bsd ;;
 esac
 
-# ── Header ─────────────────────────────────────────────────────────
+# ── Banner and identity ────────────────────────────────────────────
 host="$(slurp /proc/sys/kernel/hostname)"
 [[ -z "$host" ]] && host="$(cmd1 uname -n)"
-[[ -z "$host" ]] && host="${HOST:-${HOSTNAME:-unknown}}"
+[[ -z "$host" ]] && host="${HOSTNAME:-unknown}"
 user="${USER:-${LOGNAME:-$(id -un 2>/dev/null)}}"
 arch="$(cmd1 uname -m)"
 
-line1="${user}@${host}"
-line2="${os_name:-$OS}"
-[[ -n "$arch"     ]] && line2+=" ${G_SEP} $arch"
-[[ -n "$uptime_s" ]] && line2+=" ${G_SEP} up $(hsecs "$uptime_s")"
-
-inner=$(( W - 2 ))
-(( ${#line1} > inner )) && line1="${line1:0:inner}"
-(( ${#line2} > inner )) && line2="${line2:0:inner}"
-
-# Pad by CHARACTER count computed here, then apply with rep(). bash's
-# `printf %-*s` pads to a BYTE width, so a multibyte glyph anywhere in
-# the text would shorten the line and leave the frame ragged.
-box_row() {
-  local text=$1 style=$2
-  local fill=$(( inner - ${#text} ))
-  (( fill < 0 )) && fill=0
-  printf '  %s%s%s %s%s%s%s %s%s%s\n' \
-    "$ACC" "$G_V" "$R" "$style" "$text" "$R" "$(rep ' ' $fill)" "$ACC" "$G_V" "$R"
-}
-
-# Block-letter banner, drawn by the `asciify` command shipped alongside
-# this one. It is decoration, so every reason to skip it is honoured
-# silently: --no-banner, no asciify on PATH, or a rendering wider than
-# the terminal (asciify --width returns non-zero rather than wrapping,
-# because a wrapped banner looks worse than none).
-banner_drawn=0
+printf '\n'
 if (( show_banner )) && have asciify; then
   banner_text="${banner_override:-$brand}"
   if [[ -n "$banner_text" ]]; then
-    banner_args=( --trim --width "$(( W + 2 ))" )
-    (( unicode )) || banner_args+=( --char '#' )
-    if banner_out="$(asciify "${banner_args[@]}" "$banner_text" 2>/dev/null)" \
-       && [[ -n "$banner_out" ]]; then
-      printf '\n'
-      while IFS= read -r bl; do printf '  %s%s%s\n' "$ACC" "$bl" "$R"; done <<< "$banner_out"
-      banner_drawn=1
-    fi
-  fi
-fi
-
-if (( banner_drawn )); then
-  # The banner already says which system this is, so the frame would be
-  # repetition. A single identity line carries what it cannot: who and
-  # where, plus the uptime.
-  printf '\n  %s%s%s\n' "$B" "$line1" "$R"
-  printf '  %s%s%s\n'   "$D" "$line2" "$R"
-else
-  printf '\n  %s%s%s%s%s\n' "$ACC" "$G_TL" "$(rep "$G_H" $(( inner + 2 )))" "$G_TR" "$R"
-  box_row "$line1" "$B"
-  box_row "$line2" "$D"
-  printf '  %s%s%s%s%s\n'   "$ACC" "$G_BL" "$(rep "$G_H" $(( inner + 2 )))" "$G_BR" "$R"
-fi
-
-# ── SYSTEM ─────────────────────────────────────────────────────────
-hr "SYSTEM"
-kv "OS" "${os_name:-$OS}${arch:+ ${D}${G_SEP} ${arch}${R}}"
-kv "Kernel" "$kernel"
-[[ -n "$uptime_s" ]] && kv "Uptime" "$(hsecs "$uptime_s")"
-
-if   [[ -n "${ZSH_VERSION:-}"  ]]; then shell_desc="zsh $ZSH_VERSION"
-elif [[ -n "${BASH_VERSION:-}" ]]; then shell_desc="bash ${BASH_VERSION%%(*}"
-else                                    shell_desc="${SHELL##*/}"
-fi
-kv "Shell" "$shell_desc"
-
-desktop="${XDG_CURRENT_DESKTOP:-}"
-desktop="${desktop#*:}"                       # "ubuntu:GNOME" → "GNOME"
-[[ "$OS" == Darwin && -z "$desktop" ]] && desktop="Aqua"
-[[ -n "${XDG_SESSION_TYPE:-}" ]] && desktop="${desktop:+$desktop ${G_SEP} }${XDG_SESSION_TYPE}"
-kv "Desktop" "$desktop"
-kv "Terminal" "${TERM_PROGRAM:-${TERM:-}}"
-kv "Packages" "$pkgs"
-# Behind --all: the locale only matters when something is already wrong
-# (mojibake, odd sort order), and a line nobody reads on a good day is
-# a line that dilutes the ones they do.
-(( show_all )) && kv "Locale" "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
-
-# ── HARDWARE ───────────────────────────────────────────────────────
-hr "HARDWARE"
-kv "Machine" "$machine${chassis:+ ${D}${G_SEP} ${chassis}${R}}"
-[[ -n "$bios" ]] && kv "BIOS" "$bios"
-
-for junk in '(R)' '(TM)' '(tm)' ' CPU' ' Processor'; do
-  cpu_model="${cpu_model//$junk/}"
-done
-# Drop the "@ 1.80GHz" base clock baked into the model string: the live
-# average below is the useful figure, and showing both invites the
-# reader to wonder which one is real.
-cpu_model="${cpu_model%% @ *}"
-cpu_model="${cpu_model//  / }"; cpu_model="${cpu_model# }"
-(( cores == 0 )) && cores=$threads
-kv "CPU" "$cpu_model"
-(( threads )) && kv "Cores" "${cores} physical ${D}${G_SEP}${R} ${threads} threads"
-
-# Current against maximum: a laptop pinned far below its ceiling is
-# thermally throttled or on a power-saving governor, which is the whole
-# reason to print both.
-if (( clock_mhz || clock_max_mhz )); then
-  clk=''
-  (( clock_mhz )) && clk="$(( clock_mhz / 1000 )).$(( (clock_mhz % 1000) / 100 )) GHz ${D}now${R}"
-  (( clock_max_mhz )) && clk+="${clk:+ ${D}${G_SEP}${R} }$(( clock_max_mhz / 1000 )).$(( (clock_max_mhz % 1000) / 100 )) GHz ${D}max${R}"
-  kv "Clock" "$clk"
-fi
-
-# GPU, resolved from the PCI vendor:device pair against the system's
-# pci.ids — a plain text table that ships with hwdata. Linux only; macOS
-# does not expose an equivalent without third-party tooling.
-if [[ "$OS" == Linux ]]; then
-  pci_ids=''
-  for p in /usr/share/hwdata/pci.ids /usr/share/misc/pci.ids; do
-    [[ -r "$p" ]] && { pci_ids="$p"; break; }
-  done
-
-  lookup_pci() {
-    local pair=$1 vid did
-    vid="${pair%%:*}"; did="${pair##*:}"
-    [[ -n "$pci_ids" ]] && have awk || return
-    awk -v v="${vid,,}" -v d="${did,,}" '
-      /^#/        { next }
-      /^[0-9a-f]/ { invendor = (tolower($1) == v); next }
-      invendor && /^\t[0-9a-f]/ {
-        line = $0; sub(/^\t/, "", line)
-        if (tolower(substr(line, 1, 4)) == d) {
-          sub(/^[0-9a-f]+[ \t]+/, "", line); print line; exit
-        }
-      }
-    ' "$pci_ids" 2>/dev/null
-  }
-
-  gpu_list=()
-  for card in /sys/class/drm/card[0-9]*; do
-    [[ -r "$card/device/uevent" ]] || continue
-    pci_id=''
-    while IFS='=' read -r k v; do [[ "$k" == PCI_ID ]] && pci_id="$v"; done < "$card/device/uevent"
-    [[ -n "$pci_id" ]] || continue
-    name="$(lookup_pci "$pci_id")"
-    # Marketing names are usually bracketed: "Kaby Lake-R GT2 [UHD
-    # Graphics 620]" reads better as the bracketed part alone.
-    [[ "$name" == *'['*']'* ]] && { name="${name##*[}"; name="${name%]}"; }
-    gpu_list+=( "${name:-PCI $pci_id}" )
-  done
-  if (( ${#gpu_list[@]} )); then
-    if have sort; then
-      while IFS= read -r g; do [[ -n "$g" ]] && kv "GPU" "$g"; done \
-        < <(printf '%s\n' "${gpu_list[@]}" | sort -u)
+    bargs=( --trim --width "$FULLW" )
+    (( unicode )) || bargs+=( --char '#' )
+    # A fresh random hue per letter each run. asciify itself refuses to
+    # emit colour when stdout is not a terminal, so a captured banner
+    # stays plain — and stays measurable, since escape codes would
+    # otherwise be counted as width.
+    if (( use_color )); then
+      bargs+=( --rainbow )
+      banner_colour=''          # asciify already coloured every letter
     else
-      kv "GPU" "${gpu_list[0]}"
+      banner_colour="$ACC"
+    fi
+    if bout="$(asciify "${bargs[@]}" "$banner_text" 2>/dev/null)" && [[ -n "$bout" ]]; then
+      while IFS= read -r bl; do
+        printf '  %s%s%s\n' "$banner_colour" "$bl" "${banner_colour:+$R}"
+      done <<< "$bout"
+      printf '\n'
     fi
   fi
-
-  modes=()
-  for st in /sys/class/drm/*/status; do
-    [[ "$(slurp "$st")" == connected ]] || continue
-    m="$(slurp "${st%/status}/modes")"
-    [[ -n "$m" ]] && modes+=( "$m" )
-  done
-  if (( ${#modes[@]} )); then
-    disp="${modes[0]}"
-    (( ${#modes[@]} > 1 )) && disp+=" ${D}${G_SEP} ${#modes[@]} outputs${R}"
-    kv "Display" "$disp"
-  fi
 fi
+idline="${B}${user}@${host}${R}${D} ${G_SEP} ${os_name:-$OS}"
+[[ -n "$arch"     ]] && idline+=" ${G_SEP} $arch"
+[[ -n "$uptime_s" ]] && idline+=" ${G_SEP} up $(hsecs "$uptime_s")"
+idline+="${R}"
+printf '  %s\n\n' "$(vfit "$idline" "$FULLW")"
 
-# ── MEMORY ─────────────────────────────────────────────────────────
-hr "MEMORY"
-if (( mem_total > 0 )); then
-  meter "RAM" $(( mem_used * 100 / mem_total )) "$(hpair "$mem_used" "$mem_total")"
-else
-  kv "RAM" ""
-fi
-# Swap appears only when it is actually being used, or under --all.
-# An untouched swap partition is the normal case and reporting 0% every
-# time trains the eye to skip the row — which is exactly when a real
-# 40% would go unnoticed.
-if (( swap_total > 0 )); then
-  swap_pct=$(( swap_used * 100 / swap_total ))
-  if (( swap_pct > 0 || show_all )); then
-    meter "Swap" "$swap_pct" "$(hpair "$swap_used" "$swap_total")"
-  fi
-elif (( show_all )) && [[ "$OS" == Linux ]]; then
-  kv "Swap" "${D}none configured${R}"
-fi
-# Cache is not "used" memory — the kernel returns it on demand — but it
-# explains the gap between the RAM meter and what `free` reports.
-(( show_all && mem_cached > 0 )) && kv "Cached" "$(hkib "$mem_cached") ${D}${G_SEP} reclaimable${R}"
+# ── Build panels, most important first ─────────────────────────────
+# ATTENTION leads because it is the only one that ever demands action,
+# and in a narrow terminal the later panels are the ones scrolled past.
+attention=()
+[[ -e /var/run/reboot-required || -e /run/reboot-required ]] \
+  && attention+=( "${YEL}reboot required${R}${D} ${G_SEP} a package needs it to finish${R}" )
+[[ -n "$temp_c" ]] && (( temp_c >= 85 )) \
+  && attention+=( "${RED}CPU at ${temp_c}${G_DEG}${R}${D} ${G_SEP} thermal throttling likely${R}" )
+[[ -n "$bat_health" ]] && (( bat_health < 65 )) \
+  && attention+=( "${YEL}battery at ${bat_health}% of design capacity${R}" )
+(( bt_blocked )) && attention+=( "${YEL}bluetooth radio is blocked${R}" )
 
-# ── STORAGE ────────────────────────────────────────────────────────
-hr "STORAGE"
-disk_pct=()
+# STORAGE fills disk_pct, and ATTENTION reads it, so the filesystem scan
+# has to happen before either panel is built.
+fs_rows=()
 if have df; then
-  declare -A seen_dev=()
-  any=0
-  # Linux has /proc/mounts; elsewhere ask df itself which filesystems
-  # exist, since there is no portable mount table to read.
-  if [[ -r /proc/mounts ]]; then
-    mount_src=/proc/mounts
-  else
-    mount_src=''
-  fi
-
+  seen_devs=' '
   scan_mount() {
     local dev=$1 mnt=$2
-    [[ -n "${seen_dev[$dev]:-}" ]] && return
-    seen_dev[$dev]=1
-    local _ size used pcent
+    [[ "$seen_devs" == *" $dev "* ]] && return
+    seen_devs+="$dev "
+    local _ size used pcent pct
     read -r _ size used _ pcent _ < <(df -P -k "$mnt" 2>/dev/null | tail -n +2)
     [[ -z "${size:-}" || "${pcent:-}" != *% ]] && return
-    local pct="${pcent%\%}"
+    pct="${pcent%\%}"
     [[ "$pct" == *[!0-9]* ]] && return
-    local label="$mnt"
-    (( ${#label} > LABEL_W )) && label="…${label: -$(( LABEL_W - 1 ))}"
-    (( unicode )) || { label="$mnt"; (( ${#label} > LABEL_W )) && label="${label: -$LABEL_W}"; }
-    meter "$label" "$pct" "$(hpair "$used" "$size")"
-    # Remembered so ATTENTION below can flag a full disk without
-    # repeating the filesystem-type whitelist. Re-deriving it there
-    # let /sys/firmware/efi/efivars through, which is a pseudo-fs whose
-    # "76% full" means nothing.
+    fs_rows+=( "$mnt"$'\x1f'"$pct"$'\x1f'"$(hpair "$used" "$size")" )
     disk_pct+=( "$pct:$mnt" )
-    any=1
   }
-
-  if [[ -n "$mount_src" ]]; then
+  if [[ -r /proc/mounts ]]; then
     while read -r dev mnt fstype _; do
       case "$fstype" in
         ext2|ext3|ext4|xfs|btrfs|f2fs|zfs|vfat|exfat|ntfs|ntfs3) ;;
         *) continue ;;
       esac
       scan_mount "$dev" "$mnt"
-    done < "$mount_src"
+    done < /proc/mounts
   else
     while read -r dev _ _ _ _ mnt; do
       [[ "$dev" == /dev/* ]] || continue
       scan_mount "$dev" "$mnt"
     done < <(df -P -k 2>/dev/null | tail -n +2)
   fi
-  (( any )) || kv "Disks" ""
-else
-  kv "Disks" "${D}df unavailable${R}"
 fi
-
-# ── STATUS ─────────────────────────────────────────────────────────
-hr "STATUS"
-if [[ -n "$proc_count" ]]; then
-  kv "Processes" "$proc_count"
-fi
-if [[ -n "$load_txt" ]]; then
-  # Trim so the separator does not end up doubly spaced: load_txt is
-  # column-padded, and extra already carries its own leading separator.
-  load_txt="${load_txt%"${load_txt##*[![:space:]]}"}"
-  # Load is only meaningful against the core count: 4.0 is idle on a
-  # 64-thread box and a queue on a dual-core one. The 1-minute figure is
-  # scored against the threads available.
-  extra=''
-  (( threads )) && extra=" ${G_SEP} ${threads} threads"
-  l1="${load_txt%% *}"; l1int="${l1%%.*}"
-  if (( threads > 0 )) && [[ -n "$l1int" && "$l1int" != *[!0-9]* ]]; then
-    lpct=$(( l1int * 100 / threads ))
-    if   (( lpct >= 100 )); then extra+=" ${G_SEP} saturated"
-    elif (( lpct >= 70  )); then extra+=" ${G_SEP} busy"
-    fi
-  fi
-  kv "Load" "$load_txt${D}${extra}${R}"
-fi
-
-# Logged-in sessions. `who` is coreutils and reads utmp, which a shell
-# cannot parse itself (it is a binary record format).
-if have who; then
-  sessions="$(who 2>/dev/null | grep -c . || true)"
-  [[ -n "$sessions" && "$sessions" != 0 ]] && kv "Sessions" "$sessions logged in"
-fi
-
-if [[ -n "$temp_c" ]]; then
-  if   (( temp_c >= 85 )); then tcol=$RED
-  elif (( temp_c >= 70 )); then tcol=$YEL
-  else                          tcol=$GRN
-  fi
-  kv "Temperature" "${tcol}${temp_c}${G_DEG}${R}"
-fi
-
-if [[ -n "$bat_pct" ]]; then
-  meter "Battery" "$bat_pct" "${bat_state:-unknown}"
-  if [[ -n "$bat_health" ]]; then
-    if   (( bat_health < 65 )); then hcol=$RED
-    elif (( bat_health < 80 )); then hcol=$YEL
-    else                             hcol=$GRN
-    fi
-    kv "Health" "${hcol}${bat_health}%${R} ${D}of design capacity${R}"
-  fi
-fi
-
-# ── Network ────────────────────────────────────────────────────────
-# Linux exposes routes and addresses as files. Elsewhere there is no
-# portable equivalent that avoids third-party tooling, so the section is
-# limited to what the platform actually offers.
-if [[ "$OS" == Linux ]]; then
-  default_iface=''
-  if [[ -r /proc/net/route ]]; then
-    while read -r iface dest _; do
-      [[ "$dest" == "00000000" ]] && { default_iface="$iface"; break; }
-    done < <(tail -n +2 /proc/net/route 2>/dev/null)
-  fi
-
-  # Locally-assigned IPv4s: in /proc/net/fib_trie an address appears on
-  # the line immediately before its "/32 host LOCAL" marker.
-  declare -a local_ips=()
-  if [[ -r /proc/net/fib_trie ]]; then
-    prev=''
-    while IFS= read -r line; do
-      if [[ "$line" == *"/32 host"* ]]; then
-        cand="${prev##*|-- }"; cand="${cand// /}"
-        [[ -n "$cand" && "$cand" != 127.* && "$cand" != 0.0.0.0 ]] && local_ips+=( "$cand" )
-      fi
-      prev="$line"
-    done < /proc/net/fib_trie
-  fi
-
-  # /proc/net/route stores addresses as little-endian hex: "0001A8C0"
-  # is the bytes 00 01 A8 C0, i.e. 192.168.1.0.
-  hex_le_int() { printf '%d' $(( 0x${1:6:2} << 24 | 0x${1:4:2} << 16 | 0x${1:2:2} << 8 | 0x${1:0:2} )); }
-  dotted_int() { local IFS=.; local -a o=($1); printf '%d' $(( o[0] << 24 | o[1] << 16 | o[2] << 8 | o[3] )); }
-
-  # Keep the address inside the default route's subnet. Taking the
-  # first address found is wrong on any machine running containers:
-  # docker and lxc bridges own addresses too, and one of those would
-  # otherwise be reported as "your IP".
-  primary_ip=''
-  if [[ -n "$default_iface" && ${#local_ips[@]} -gt 0 && -r /proc/net/route ]]; then
-    while read -r rif rdest _ _ _ _ _ rmask _; do
-      [[ "$rif" == "$default_iface" && "$rdest" != "00000000" ]] || continue
-      net=$(hex_le_int "$rdest"); msk=$(hex_le_int "$rmask")
-      for ip in "${local_ips[@]}"; do
-        [[ "$ip" == *[!0-9.]* ]] && continue
-        (( ($(dotted_int "$ip") & msk) == net )) && { primary_ip="$ip"; break 2; }
-      done
-    done < <(tail -n +2 /proc/net/route 2>/dev/null)
-  fi
-  [[ -z "$primary_ip" && ${#local_ips[@]} -gt 0 ]] && primary_ip="${local_ips[0]}"
-
-  virtual=0; shown=0
-  for iface in /sys/class/net/*; do
-    name="${iface##*/}"
-    [[ "$name" == lo ]] && continue
-    [[ "$(slurp "$iface/operstate")" == up ]] || continue
-    if (( ! show_all )); then
-      case "$name" in
-        veth*|docker*|br-*|virbr*|vmnet*|tun*|tap*|cni*|flannel*)
-          (( virtual++ )); continue ;;
-      esac
-    fi
-    detail="$name"
-    if [[ "$name" == "$default_iface" ]]; then
-      [[ -n "$primary_ip" ]] && detail+=" ${D}${G_SEP}${R} ${primary_ip}"
-      detail+=" ${D}${G_SEP} default route${R}"
-    fi
-    spd="$(slurp "$iface/speed")"
-    [[ -n "$spd" && "$spd" != *[!0-9]* ]] && (( spd > 0 )) && detail+=" ${D}${G_SEP} ${spd} Mb/s${R}"
-    kv "Network" "${GRN}${G_UP}${R} $detail"
-    shown=1
-  done
-  (( shown )) || kv "Network" "${D}no active interface${R}"
-  (( virtual )) && kv "" "${D}+ ${virtual} virtual (docker/bridge) ${G_SEP} see --all${R}"
-fi
-
-# ── ATTENTION ──────────────────────────────────────────────────────
-# The only section that can be absent entirely. Everything above is
-# description; this is the part that asks for an action, so it must not
-# appear unless there is one. A permanent "nothing to report" banner
-# teaches the eye to skip precisely the lines that will matter later.
-attention=()
-
-[[ -e /var/run/reboot-required || -e /run/reboot-required ]] \
-  && attention+=( "${YEL}reboot required${R}${D} ${G_SEP} a package needs it to finish${R}" )
-
-# A filesystem past 90% is the classic overnight outage. Reuses the
-# entries STORAGE already vetted, so pseudo-filesystems cannot appear.
 for entry in "${disk_pct[@]}"; do
   p="${entry%%:*}"; mnt="${entry#*:}"
   (( p >= 90 )) && attention+=( "${RED}${mnt} is ${p}% full${R}" )
 done
 
-[[ -n "$temp_c" ]] && (( temp_c >= 85 )) \
-  && attention+=( "${RED}CPU at ${temp_c}${G_DEG}${R}${D} ${G_SEP} thermal throttling likely${R}" )
-
-[[ -n "$bat_health" ]] && (( bat_health < 65 )) \
-  && attention+=( "${YEL}battery at ${bat_health}% of design capacity${R}" )
-
 if (( ${#attention[@]} )); then
-  hr "ATTENTION"
-  for a in "${attention[@]}"; do
-    printf '    %s%s%s %s\n' "$YEL" "$G_UP" "$R" "$a"
-  done
+  _pw=$FULLW; panel_begin "ATTENTION" 1
+  for a in "${attention[@]}"; do panel_text "${YEL}${G_UP}${R} $a"; done
+  panel_end
 fi
 
-printf '\n'
+_pw=$BOXW
+panel_begin "SYSTEM"
+panel_row "OS"       "${os_name:-$OS}"
+panel_row "Kernel"   "$kernel"
+[[ -n "$uptime_s" ]] && panel_row "Uptime" "$(hsecs "$uptime_s")"
+if   [[ -n "${ZSH_VERSION:-}"  ]]; then panel_row "Shell" "zsh $ZSH_VERSION"
+elif [[ -n "${BASH_VERSION:-}" ]]; then panel_row "Shell" "bash ${BASH_VERSION%%(*}"
+else                                    panel_row "Shell" "${SHELL##*/}"; fi
+desktop="${XDG_CURRENT_DESKTOP:-}"; desktop="${desktop#*:}"
+[[ "$OS" == Darwin && -z "$desktop" ]] && desktop="Aqua"
+[[ -n "${XDG_SESSION_TYPE:-}" ]] && desktop="${desktop:+$desktop ${G_SEP} }${XDG_SESSION_TYPE}"
+[[ -n "$desktop" ]] && panel_row "Desktop" "$desktop"
+panel_row "Terminal" "${TERM_PROGRAM:-${TERM:-}}"
+[[ -n "$pkgs" ]] && panel_row "Packages" "$pkgs"
+(( show_all )) && panel_row "Locale" "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+panel_end
+
+panel_begin "HARDWARE"
+for junk in '(R)' '(TM)' '(tm)' ' CPU' ' Processor'; do cpu_model="${cpu_model//$junk/}"; done
+# The base clock baked into the model string is dropped: the live
+# average is measured below, and printing both invites the reader to
+# wonder which is real.
+cpu_model="${cpu_model%% @ *}"; cpu_model="${cpu_model//  / }"; cpu_model="${cpu_model# }"
+(( cores == 0 )) && cores=$threads
+[[ -n "$machine" ]] && panel_row "Machine" "$machine${chassis:+ ${G_SEP} $chassis}"
+panel_row "CPU" "$cpu_model"
+(( threads )) && panel_row "Cores" "${cores}C ${G_SEP} ${threads}T"
+if (( clock_mhz || clock_max_mhz )); then
+  # Current against maximum: a machine pinned far below its ceiling is
+  # throttled or on a power-saving governor, which is why both appear.
+  clk=''
+  (( clock_mhz )) && clk="$(( clock_mhz / 1000 )).$(( (clock_mhz % 1000) / 100 ))"
+  (( clock_max_mhz )) && clk+="${clk:+ / }$(( clock_max_mhz / 1000 )).$(( (clock_max_mhz % 1000) / 100 ))"
+  panel_row "Clock" "$clk GHz"
+fi
+if [[ "$OS" == Linux ]]; then
+  pci_ids=''
+  for p in /usr/share/hwdata/pci.ids /usr/share/misc/pci.ids; do
+    [[ -r "$p" ]] && { pci_ids="$p"; break; }
+  done
+  lookup_pci() {
+    local pair=$1 vid did
+    vid="${pair%%:*}"; did="${pair##*:}"
+    [[ -n "$pci_ids" ]] && have awk || return
+    awk -v v="$(printf '%s' "$vid" | tr 'A-Z' 'a-z')" \
+        -v d="$(printf '%s' "$did" | tr 'A-Z' 'a-z')" '
+      /^#/        { next }
+      /^[0-9a-f]/ { invendor = (tolower($1) == v); next }
+      invendor && /^\t[0-9a-f]/ {
+        line = $0; sub(/^\t/, "", line)
+        if (tolower(substr(line, 1, 4)) == d) { sub(/^[0-9a-f]+[ \t]+/, "", line); print line; exit }
+      }' "$pci_ids" 2>/dev/null
+  }
+  gpus=''
+  for card in /sys/class/drm/card[0-9]*; do
+    [[ -r "$card/device/uevent" ]] || continue
+    pci_id=''
+    while IFS='=' read -r k v; do [[ "$k" == PCI_ID ]] && pci_id="$v"; done < "$card/device/uevent"
+    [[ -n "$pci_id" ]] || continue
+    nm="$(lookup_pci "$pci_id")"
+    # Marketing names are bracketed: "Kaby Lake-R GT2 [UHD Graphics 620]"
+    # reads better as just the bracketed part.
+    [[ "$nm" == *'['*']'* ]] && { nm="${nm##*[}"; nm="${nm%]}"; }
+    nm="${nm:-PCI $pci_id}"
+    [[ "$gpus" == *"$nm"* ]] || { [[ -n "$gpus" ]] && gpus+=", "; gpus+="$nm"; }
+  done
+  [[ -n "$gpus" ]] && panel_row "GPU" "$gpus"
+  modes=()
+  for st in /sys/class/drm/*/status; do
+    [[ "$(slurp "$st")" == connected ]] || continue
+    m="$(slurp "${st%/status}/modes")"; [[ -n "$m" ]] && modes+=( "$m" )
+  done
+  if (( ${#modes[@]} )); then
+    disp="${modes[0]}"
+    (( ${#modes[@]} > 1 )) && disp+=" ${G_SEP} ${#modes[@]} out"
+    panel_row "Display" "$disp"
+  fi
+fi
+[[ -n "$bios" ]] && panel_row "BIOS" "$bios"
+panel_end
+
+panel_begin "MEMORY"
+if (( mem_total > 0 )); then
+  panel_meter "RAM" $(( mem_used * 100 / mem_total )) "$(hpair "$mem_used" "$mem_total")"
+fi
+# Swap appears only when in use: reporting 0% every time trains the eye
+# to skip the row, which is exactly when a real 40% would go unnoticed.
+if (( swap_total > 0 )); then
+  sp=$(( swap_used * 100 / swap_total ))
+  (( sp > 0 || show_all )) && panel_meter "Swap" "$sp" "$(hpair "$swap_used" "$swap_total")"
+elif (( show_all )); then
+  panel_row "Swap" "${D}none${R}"
+fi
+(( show_all && mem_cached > 0 )) && panel_row "Cached" "$(hkib "$mem_cached")"
+panel_end
+
+panel_begin "STORAGE"
+if (( ${#fs_rows[@]} )); then
+  for row in "${fs_rows[@]}"; do
+    mnt="${row%%$'\x1f'*}"; rest="${row#*$'\x1f'}"
+    pct="${rest%%$'\x1f'*}"; det="${rest#*$'\x1f'}"
+    panel_meter "$(vfit "$mnt" $LW)" "$pct" "$det"
+  done
+else
+  panel_row "Disks" ""
+fi
+if (( ${#disks[@]} )); then
+  panel_rule
+  for row in "${disks[@]}"; do
+    nm="${row%%$'\x1f'*}"; rest="${row#*$'\x1f'}"
+    mdl="${rest%%$'\x1f'*}"; kib="${rest#*$'\x1f'}"
+    panel_row "$nm" "$(hkib "$kib") ${D}${G_SEP} ${mdl}${R}"
+  done
+fi
+panel_end
+
+panel_begin "NETWORK"
+if [[ -n "$default_iface" ]]; then
+  panel_row "Interface" "${GRN}${G_DOT}${R} $default_iface"
+  [[ -n "$primary_ip" ]] && panel_row "IPv4" "$primary_ip"
+  [[ -n "$gateway"    ]] && panel_row "Gateway" "$gateway"
+  [[ -n "$dns_txt"    ]] && panel_row "DNS" "$dns_txt"
+else
+  panel_row "Interface" "${D}offline${R}"
+fi
+if [[ -n "$wifi_if" ]]; then
+  panel_rule
+  [[ -n "$wifi_ssid" ]] && panel_row "Wi-Fi" "$wifi_ssid"
+  if [[ -n "$wifi_qual" ]]; then
+    # Signal is reported as "quality good/bad", so the meter is inverted
+    # relative to the usage bars: more is better here.
+    wq=$wifi_qual; (( wq > 100 )) && wq=100
+    if   (( wq >= 60 )); then wcol=$GRN
+    elif (( wq >= 35 )); then wcol=$YEL
+    else                      wcol=$RED
+    fi
+    panel_row "Signal" "${wcol}${wq}%${R}${wifi_dbm:+ ${D}${G_SEP} ${wifi_dbm} dBm${R}}"
+  fi
+fi
+if (( bt_present )); then
+  if (( bt_blocked )); then
+    panel_row "Bluetooth" "${YEL}blocked${R}"
+  elif (( bt_conns )); then
+    panel_row "Bluetooth" "${GRN}${G_DOT}${R} ${bt_conns} connected"
+  else
+    panel_row "Bluetooth" "${D}on, idle${R}"
+  fi
+fi
+if (( ${#nets[@]} > 1 )); then
+  virt=0; extra=''
+  for nm in "${nets[@]}"; do
+    [[ "$nm" == "$default_iface" ]] && continue
+    case "$nm" in
+      veth*|docker*|br-*|virbr*|vmnet*|tun*|tap*|cni*|flannel*)
+        virt=$(( virt + 1 )); (( show_all )) || continue ;;
+    esac
+    extra+="${extra:+, }$nm"
+  done
+  [[ -n "$extra" ]] && panel_row "Also up" "$extra"
+  (( virt && ! show_all )) && panel_row "Virtual" "${D}${virt} docker/bridge${R}"
+fi
+panel_end
+
+# DEVICES only exists when something is actually attached — an empty
+# "nothing plugged in" panel would occupy a grid cell to say nothing.
+if (( ${#removables[@]} || ${#usb_names[@]} )); then
+  panel_begin "DEVICES"
+  for row in "${removables[@]}"; do
+    nm="${row%%$'\x1f'*}"; rest="${row#*$'\x1f'}"
+    mdl="${rest%%$'\x1f'*}"; kib="${rest#*$'\x1f'}"
+    mounted=''
+    if [[ -r /proc/mounts ]]; then
+      while read -r dev mnt _; do
+        [[ "$dev" == /dev/"$nm"* ]] && { mounted="$mnt"; break; }
+      done < /proc/mounts
+    fi
+    panel_row "$nm" "${GRN}${G_DOT}${R} $(hkib "$kib") ${D}${G_SEP} ${mdl}${R}"
+    [[ -n "$mounted" ]] && panel_row "" "${D}at ${mounted}${R}" \
+                        || panel_row "" "${D}not mounted${R}"
+  done
+  if (( ${#usb_names[@]} )); then
+    (( ${#removables[@]} )) && panel_rule
+    if (( show_all )); then
+      for nm in "${usb_names[@]}"; do panel_row "USB" "$nm"; done
+    else
+      panel_row "USB" "${usb_names[0]}"
+      (( ${#usb_names[@]} > 1 )) && panel_row "" "${D}+$(( ${#usb_names[@]} - 1 )) more ${G_SEP} --all${R}"
+    fi
+  fi
+  panel_end
+fi
+
+# STATUS spans the full width: it is a single line of live numbers, and
+# boxing it into one grid cell would waste the rest of the row.
+_pw=$FULLW
+panel_begin "STATUS" 1
+statline=''
+[[ -n "$load_txt" ]] && statline+="${D}load${R} $load_txt"
+if [[ -n "$proc_count" ]]; then
+  statline+="${statline:+   }${D}procs${R} $proc_count"
+fi
+if [[ -n "$temp_c" ]]; then
+  if   (( temp_c >= 85 )); then tcol=$RED
+  elif (( temp_c >= 70 )); then tcol=$YEL
+  else                          tcol=$GRN
+  fi
+  statline+="${statline:+   }${D}temp${R} ${tcol}${temp_c}${G_DEG}${R}"
+fi
+if [[ -n "$bat_pct" ]]; then
+  statline+="${statline:+   }${D}battery${R} $(sev $(( 100 - bat_pct )))${bat_pct}%${R}"
+  [[ -n "$bat_state"  ]] && statline+=" ${D}${bat_state}${R}"
+  [[ -n "$bat_health" ]] && statline+=" ${D}(health ${bat_health}%)${R}"
+fi
+panel_text "${statline:-${D}no live metrics available${R}}"
+panel_end
+
+# ── Lay the panels out ─────────────────────────────────────────────
+# Panels are printed a row at a time, taking line N from each panel in
+# the row. Short panels are padded so the ones beside them keep their
+# left edge.
+emit_row() {
+  local -a idx=( "$@" )
+  local -a flat=() heights=() offs=()
+  local b h line acc=0 maxh=0 i r c out
+  for b in "${idx[@]}"; do
+    h=0
+    while IFS= read -r line; do flat+=( "$line" ); h=$(( h + 1 )); done <<< "${PANELS[$b]}"
+    heights+=( "$h" ); offs+=( "$acc" ); acc=$(( acc + h ))
+    (( h > maxh )) && maxh=$h
+  done
+  for (( r = 0; r < maxh; r++ )); do
+    out='  '
+    for (( c = 0; c < ${#idx[@]}; c++ )); do
+      if (( r < heights[c] )); then out+="${flat[ offs[c] + r ]}"
+      else                          out+="$(rep ' ' $BOXW)"
+      fi
+      (( c < ${#idx[@]} - 1 )) && out+="$(rep ' ' $GAP)"
+    done
+    printf '%s\n' "$(rtrim "$out")"
+  done
+}
+
+row=()
+for i in "${!PANELS[@]}"; do
+  if (( PANEL_FULL[i] )); then
+    (( ${#row[@]} )) && { emit_row "${row[@]}"; row=(); printf '\n'; }
+    emit_row "$i"; printf '\n'
+    continue
+  fi
+  row+=( "$i" )
+  if (( ${#row[@]} == NCOL )); then
+    emit_row "${row[@]}"; row=(); printf '\n'
+  fi
+done
+# An `if`, not `(( … )) && …`: when the grid happens to end on a full
+# row there is no trailing partial row, the test is false, and that
+# false becomes the script's exit status — reporting failure after a
+# perfectly good report. The same trap that puts a phantom "✘ 1" on the
+# first prompt when .zshrc ends with a failed test.
+if (( ${#row[@]} )); then
+  emit_row "${row[@]}"
+fi
+exit 0
