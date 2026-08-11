@@ -362,45 +362,101 @@ if (( ${#bins[@]} == 0 )); then
   pass "no shipped commands to check"
 fi
 
+# Properties every shipped command must have, whatever it does.
+# NOTE: stdin is redirected from /dev/null throughout. `asciify` reads a
+# line from stdin when given no text, so a test that leaves stdin
+# attached would block instead of failing.
 for bin in "${bins[@]}"; do
   name="${bin##*/}"
   [[ -x "$bin" ]] || fail "$name is not executable (it is on \$PATH)"
 
-  if head -1 "$bin" | grep -q 'bash'; then
-    if err="$(bash -n "$bin" 2>&1)"; then
+  interp="$(head -1 "$bin")"
+  case "$interp" in
+    *bash) checker=(bash -n) ;;
+    *zsh)  checker=(zsh -n)  ;;
+    *)     checker=() ;;
+  esac
+  if (( ${#checker[@]} )); then
+    if err="$("${checker[@]}" "$bin" 2>&1)"; then
       pass "$name parses"
     else
       fail "$name has a syntax error: $err"
     fi
   fi
 
-  # It must survive every rendering mode, including the degraded ones:
-  # piped output, no colour, and a terminal with no UTF-8.
-  for mode in "" "--no-color" "--ascii" "--no-color --ascii"; do
-    if timeout 20 "$bin" $mode >/dev/null 2>&1; then
-      pass "$name runs${mode:+ with ${mode}}"
+  if timeout 20 "$bin" --help </dev/null >/dev/null 2>&1; then
+    pass "$name --help works"
+  else
+    fail "$name --help exited non-zero"
+  fi
+done
+
+# my-computer is a report: it has rendering modes and must never come
+# back empty. Checked specifically rather than assumed of every binary.
+mc="$PROFILE_DIR/bin/my-computer"
+if [[ -x "$mc" ]]; then
+  for mode in "" "--no-color" "--ascii" "--no-color --ascii" "--all" "--no-banner"; do
+    if timeout 25 "$mc" $mode </dev/null >/dev/null 2>&1; then
+      pass "my-computer runs${mode:+ ${mode}}"
     else
-      fail "$name exited non-zero${mode:+ with ${mode}}"
+      fail "my-computer exited non-zero${mode:+ with ${mode}}"
     fi
   done
 
-  # A report that silently prints nothing is a failure the exit status
-  # would not catch.
-  lines="$(timeout 20 "$bin" --no-color 2>/dev/null | grep -c .)"
-  if (( lines >= 10 )); then
-    pass "$name produced $lines lines of output"
+  lines="$(timeout 25 "$mc" --no-color </dev/null 2>/dev/null | grep -c .)"
+  if (( lines >= 15 )); then
+    pass "my-computer produced $lines lines"
   else
-    fail "$name produced only $lines lines — expected a full report"
+    fail "my-computer produced only $lines lines — expected a full report"
   fi
 
-  # ASCII mode exists so non-UTF-8 terminals stay readable; if any
-  # multibyte glyph leaks through, it defeats the point.
-  if timeout 20 "$bin" --ascii --no-color 2>/dev/null | LC_ALL=C grep -q '[^[:print:][:space:]]'; then
-    fail "$name emits non-ASCII bytes in --ascii mode"
+  if timeout 25 "$mc" --ascii --no-color </dev/null 2>/dev/null \
+       | LC_ALL=C grep -q '[^[:print:][:space:]]'; then
+    fail "my-computer emits non-ASCII bytes in --ascii mode"
   else
-    pass "$name is pure ASCII in --ascii mode"
+    pass "my-computer is pure ASCII in --ascii mode"
   fi
-done
+fi
+
+# asciify is a filter: it renders text it is given, on argv or stdin.
+asc="$PROFILE_DIR/bin/asciify"
+if [[ -x "$asc" ]]; then
+  out="$(timeout 20 "$asc" --trim "HI" </dev/null 2>/dev/null)"
+  if [[ "$(printf '%s' "$out" | grep -c .)" == 5 ]]; then
+    pass "asciify renders 5 rows from an argument"
+  else
+    fail "asciify did not render 5 rows"
+  fi
+
+  if [[ "$(printf 'HI\n' | timeout 20 "$asc" --trim 2>/dev/null)" == "$out" ]]; then
+    pass "asciify reads stdin identically to argv"
+  else
+    fail "asciify gives different output for stdin and argv"
+  fi
+
+  if printf 'AB\n' | timeout 20 "$asc" --char '#' 2>/dev/null \
+       | LC_ALL=C grep -q '[^[:print:][:space:]]'; then
+    fail "asciify --char '#' still emits multibyte glyphs"
+  else
+    pass "asciify --char '#' is pure ASCII"
+  fi
+
+  # --width is the contract my-computer relies on to decide whether a
+  # banner fits: too wide must mean "no output, non-zero", never a
+  # wrapped banner.
+  if timeout 20 "$asc" --width 10 "TOOWIDE" </dev/null 2>/dev/null | grep -q .; then
+    fail "asciify --width printed output that exceeds the limit"
+  else
+    pass "asciify --width suppresses an oversized render"
+  fi
+
+  # Arbitrary input must never crash it — unknown glyphs fall back.
+  if timeout 20 "$asc" '~@#$%' </dev/null >/dev/null 2>&1; then
+    pass "asciify survives unsupported characters"
+  else
+    fail "asciify failed on unsupported characters"
+  fi
+fi
 
 # ── Summary ────────────────────────────────────────────────────────
 printf '\n────────────────────────────────────────\n'

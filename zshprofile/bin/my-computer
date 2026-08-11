@@ -56,16 +56,20 @@ use_color=1
 show_all=0
 width_opt=0
 force_ascii=0
+show_banner=1
+banner_override=''
 
 [[ -t 1 ]] || use_color=0
 [[ -n "${NO_COLOR:-}" ]] && use_color=0
 
 while (( $# )); do
   case "$1" in
-    --no-color) use_color=0 ;;
-    --ascii)    force_ascii=1 ;;
-    --all)      show_all=1 ;;
-    --width)    shift; width_opt="${1:-0}" ;;
+    --no-color)  use_color=0 ;;
+    --ascii)     force_ascii=1 ;;
+    --all)       show_all=1 ;;
+    --no-banner) show_banner=0 ;;
+    --banner)    shift; banner_override="${1:-}" ;;
+    --width)     shift; width_opt="${1:-0}" ;;
     -h|--help)
       while IFS= read -r l; do
         [[ "$l" == '#'* ]] || break
@@ -97,12 +101,15 @@ else
   G_FULL='#' G_EMPTY='.' G_UP='*' G_SEP='-' G_DEG='C' G_DASH='-'
 fi
 
+# Palette: ONE accent, plus dim, plus three status colours. Nothing
+# else. A second decorative hue competes with the accent for attention
+# and the eye stops knowing which one means "look here".
 if (( use_color )); then
   R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
   RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'
-  MAG=$'\033[35m'; CYN=$'\033[36m'
+  ACC=$'\033[36m'                   # the single accent: rules + banner
 else
-  R='' B='' D='' RED='' GRN='' YEL='' MAG='' CYN=''
+  R='' B='' D='' RED='' GRN='' YEL='' ACC=''
 fi
 
 # ── Layout ─────────────────────────────────────────────────────────
@@ -116,6 +123,13 @@ else
 fi
 LABEL_W=13                       # sized to the longest label, "Temperature"
 BAR_W=16
+# Rules stop at the CONTENT width, not the terminal width. A rule drawn
+# out to 72 columns above rows that end near 53 reads as a heavy bar
+# with a ragged gap under it; matching the content keeps the section
+# heading attached to the rows it introduces.
+#   4 indent + label + 1 + bar + 1 + "100%" + 2 + "156.1 / 445.3 GiB"
+RULE_W=$(( 4 + LABEL_W + 1 + BAR_W + 1 + 4 + 2 + 18 ))
+(( RULE_W > W )) && RULE_W=$W
 
 # ── Builtin-only helpers ───────────────────────────────────────────
 rep()   { local c=$1 n=$2 s=''; while (( n-- > 0 )); do s+="$c"; done; printf '%s' "$s"; }
@@ -132,9 +146,9 @@ hr() {
   # `local` before performing any assignment, so ${#name} would read an
   # unbound variable — fatal under `set -u`.
   local name=$1
-  local pad=$(( W - ${#name} - 3 ))
+  local pad=$(( RULE_W - ${#name} - 3 ))
   (( pad < 0 )) && pad=0
-  printf '\n  %s%s%s %s%s%s\n' "$B$CYN" "$name" "$R" "$D" "$(rep "$G_H" $pad)" "$R"
+  printf '\n  %s%s%s %s%s%s\n' "$B$ACC" "$name" "$R" "$D" "$(rep "$G_H" $pad)" "$R"
 }
 
 kv() {
@@ -204,16 +218,40 @@ sep() { printf ' %s%s%s ' "$D" "$G_SEP" "$R"; }
 #  variables. Anything a platform cannot answer stays empty and prints
 #  as a dash.
 # ════════════════════════════════════════════════════════════════════
-os_name='' kernel='' uptime_s='' pkgs='' machine='' bios=''
-cpu_model='' cores=0 threads=0 clock_mhz=0
-mem_total=0 mem_used=0 swap_total=0 swap_used=0
-load_txt='' proc_count='' temp_c='' bat_pct='' bat_state=''
+os_name='' kernel='' uptime_s='' pkgs='' machine='' bios='' chassis=''
+cpu_model='' cores=0 threads=0 clock_mhz=0 clock_max_mhz=0
+mem_total=0 mem_used=0 mem_cached=0 swap_total=0 swap_used=0
+load_txt='' proc_count='' temp_c='' bat_pct='' bat_state='' bat_health=''
+brand=''
+
+# SMBIOS chassis codes. Worth naming: "10" tells you nothing, "Notebook"
+# tells you whether to expect a battery and thermal throttling.
+chassis_name() {
+  case "$1" in
+    3)  printf 'Desktop' ;;      4)  printf 'Low Profile Desktop' ;;
+    5)  printf 'Pizza Box' ;;    6)  printf 'Mini Tower' ;;
+    7)  printf 'Tower' ;;        8)  printf 'Portable' ;;
+    9)  printf 'Laptop' ;;       10) printf 'Notebook' ;;
+    11) printf 'Hand Held' ;;    13) printf 'All In One' ;;
+    14) printf 'Sub Notebook' ;; 17) printf 'Main Server Chassis' ;;
+    18) printf 'Expansion Chassis' ;;
+    23) printf 'Rack Mount Chassis' ;;
+    30) printf 'Tablet' ;;       31) printf 'Convertible' ;;
+    32) printf 'Detachable' ;;
+    *)  printf '' ;;
+  esac
+}
 
 collect_linux() {
   if [[ -r /etc/os-release ]]; then
     while IFS='=' read -r k v; do
       v="${v%\"}"; v="${v#\"}"
-      [[ "$k" == PRETTY_NAME ]] && os_name="$v"
+      case "$k" in
+        PRETTY_NAME) os_name="$v" ;;
+        # ID drives the banner: "ubuntu" → UBUNTU, the distro's own name,
+        # which is what a logo would have said.
+        ID)          brand="$v" ;;
+      esac
     done < /etc/os-release
   fi
   kernel="$(slurp /proc/sys/kernel/osrelease)"
@@ -236,6 +274,7 @@ collect_linux() {
   local bv bd
   bv="$(slurp $dmi/bios_version)"; bd="$(slurp $dmi/bios_date)"
   [[ -n "$bv" ]] && bios="$bv${bd:+ ${D}${G_SEP} ${bd}${R}}"
+  chassis="$(chassis_name "$(slurp $dmi/chassis_type)")"
 
   # Physical cores are the distinct (physical id, core id) pairs; that
   # is what separates real cores from hyperthreads, which /proc/cpuinfo
@@ -258,8 +297,10 @@ collect_linux() {
     sum=$(( sum + k )); (( n++ ))
   done
   (( n )) && clock_mhz=$(( sum / n / 1000 ))
+  k="$(slurp /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)"
+  [[ -n "$k" && "$k" != *[!0-9]* ]] && clock_max_mhz=$(( k / 1000 ))
 
-  local key v
+  local key v cached=0 buffers=0
   while read -r key v _; do
     case "$key" in
       MemTotal:)     mem_total=$v ;;
@@ -267,10 +308,13 @@ collect_linux() {
       # cache and buffers the kernel hands back on demand, which makes
       # an ordinary system look nearly out of memory.
       MemAvailable:) mem_used=$v ;;
+      Cached:)       cached=$v ;;
+      Buffers:)      buffers=$v ;;
       SwapTotal:)    swap_total=$v ;;
       SwapFree:)     swap_used=$v ;;
     esac
   done < /proc/meminfo 2>/dev/null
+  mem_cached=$(( cached + buffers ))
   mem_used=$(( mem_total - mem_used ))
   swap_used=$(( swap_total - swap_used ))
 
@@ -300,12 +344,21 @@ collect_linux() {
     done
   fi
 
-  local bat a
+  local bat a full design
   for bat in /sys/class/power_supply/BAT*; do
     [[ -d "$bat" ]] || continue
     bat_pct="$(slurp "$bat/capacity")"
     [[ -z "$bat_pct" || "$bat_pct" == *[!0-9]* ]] && { bat_pct=''; continue; }
     bat_state="$(slurp "$bat/status")"
+    # Wear: what the cell holds now against what it shipped with. This is
+    # the number that explains a laptop that suddenly stops lasting.
+    full="$(slurp "$bat/energy_full")";        design="$(slurp "$bat/energy_full_design")"
+    [[ -z "$full" ]] && full="$(slurp "$bat/charge_full")"
+    [[ -z "$design" ]] && design="$(slurp "$bat/charge_full_design")"
+    if [[ -n "$full" && -n "$design" && "$full" != *[!0-9]* && "$design" != *[!0-9]* ]] \
+       && (( design > 0 )); then
+      bat_health=$(( full * 100 / design ))
+    fi
     for a in /sys/class/power_supply/A{C,DP}*; do
       [[ -r "$a/online" ]] || continue
       [[ "$(slurp "$a/online")" == 1 ]] && bat_state+=" ${G_SEP} AC" || bat_state+=" ${G_SEP} battery"
@@ -418,17 +471,47 @@ box_row() {
   local fill=$(( inner - ${#text} ))
   (( fill < 0 )) && fill=0
   printf '  %s%s%s %s%s%s%s %s%s%s\n' \
-    "$MAG" "$G_V" "$R" "$style" "$text" "$R" "$(rep ' ' $fill)" "$MAG" "$G_V" "$R"
+    "$ACC" "$G_V" "$R" "$style" "$text" "$R" "$(rep ' ' $fill)" "$ACC" "$G_V" "$R"
 }
 
-printf '\n  %s%s%s%s%s\n' "$MAG" "$G_TL" "$(rep "$G_H" $(( inner + 2 )))" "$G_TR" "$R"
-box_row "$line1" "$B"
-box_row "$line2" "$D"
-printf '  %s%s%s%s%s\n'   "$MAG" "$G_BL" "$(rep "$G_H" $(( inner + 2 )))" "$G_BR" "$R"
+# Block-letter banner, drawn by the `asciify` command shipped alongside
+# this one. It is decoration, so every reason to skip it is honoured
+# silently: --no-banner, no asciify on PATH, or a rendering wider than
+# the terminal (asciify --width returns non-zero rather than wrapping,
+# because a wrapped banner looks worse than none).
+banner_drawn=0
+if (( show_banner )) && have asciify; then
+  banner_text="${banner_override:-$brand}"
+  if [[ -n "$banner_text" ]]; then
+    banner_args=( --trim --width "$(( W + 2 ))" )
+    (( unicode )) || banner_args+=( --char '#' )
+    if banner_out="$(asciify "${banner_args[@]}" "$banner_text" 2>/dev/null)" \
+       && [[ -n "$banner_out" ]]; then
+      printf '\n'
+      while IFS= read -r bl; do printf '  %s%s%s\n' "$ACC" "$bl" "$R"; done <<< "$banner_out"
+      banner_drawn=1
+    fi
+  fi
+fi
+
+if (( banner_drawn )); then
+  # The banner already says which system this is, so the frame would be
+  # repetition. A single identity line carries what it cannot: who and
+  # where, plus the uptime.
+  printf '\n  %s%s%s\n' "$B" "$line1" "$R"
+  printf '  %s%s%s\n'   "$D" "$line2" "$R"
+else
+  printf '\n  %s%s%s%s%s\n' "$ACC" "$G_TL" "$(rep "$G_H" $(( inner + 2 )))" "$G_TR" "$R"
+  box_row "$line1" "$B"
+  box_row "$line2" "$D"
+  printf '  %s%s%s%s%s\n'   "$ACC" "$G_BL" "$(rep "$G_H" $(( inner + 2 )))" "$G_BR" "$R"
+fi
 
 # ── SYSTEM ─────────────────────────────────────────────────────────
 hr "SYSTEM"
+kv "OS" "${os_name:-$OS}${arch:+ ${D}${G_SEP} ${arch}${R}}"
 kv "Kernel" "$kernel"
+[[ -n "$uptime_s" ]] && kv "Uptime" "$(hsecs "$uptime_s")"
 
 if   [[ -n "${ZSH_VERSION:-}"  ]]; then shell_desc="zsh $ZSH_VERSION"
 elif [[ -n "${BASH_VERSION:-}" ]]; then shell_desc="bash ${BASH_VERSION%%(*}"
@@ -443,10 +526,14 @@ desktop="${desktop#*:}"                       # "ubuntu:GNOME" → "GNOME"
 kv "Desktop" "$desktop"
 kv "Terminal" "${TERM_PROGRAM:-${TERM:-}}"
 kv "Packages" "$pkgs"
+# Behind --all: the locale only matters when something is already wrong
+# (mojibake, odd sort order), and a line nobody reads on a good day is
+# a line that dilutes the ones they do.
+(( show_all )) && kv "Locale" "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
 
 # ── HARDWARE ───────────────────────────────────────────────────────
 hr "HARDWARE"
-kv "Machine" "$machine"
+kv "Machine" "$machine${chassis:+ ${D}${G_SEP} ${chassis}${R}}"
 [[ -n "$bios" ]] && kv "BIOS" "$bios"
 
 for junk in '(R)' '(TM)' '(tm)' ' CPU' ' Processor'; do
@@ -458,10 +545,18 @@ done
 cpu_model="${cpu_model%% @ *}"
 cpu_model="${cpu_model//  / }"; cpu_model="${cpu_model# }"
 (( cores == 0 )) && cores=$threads
-cpu_desc="$cpu_model"
-(( threads )) && cpu_desc+=" ${D}${G_SEP} ${cores}C/${threads}T${R}"
-(( clock_mhz )) && cpu_desc+=" ${D}${G_SEP} $(( clock_mhz / 1000 )).$(( (clock_mhz % 1000) / 100 )) GHz${R}"
-kv "CPU" "$cpu_desc"
+kv "CPU" "$cpu_model"
+(( threads )) && kv "Cores" "${cores} physical ${D}${G_SEP}${R} ${threads} threads"
+
+# Current against maximum: a laptop pinned far below its ceiling is
+# thermally throttled or on a power-saving governor, which is the whole
+# reason to print both.
+if (( clock_mhz || clock_max_mhz )); then
+  clk=''
+  (( clock_mhz )) && clk="$(( clock_mhz / 1000 )).$(( (clock_mhz % 1000) / 100 )) GHz ${D}now${R}"
+  (( clock_max_mhz )) && clk+="${clk:+ ${D}${G_SEP}${R} }$(( clock_max_mhz / 1000 )).$(( (clock_max_mhz % 1000) / 100 )) GHz ${D}max${R}"
+  kv "Clock" "$clk"
+fi
 
 # GPU, resolved from the PCI vendor:device pair against the system's
 # pci.ids — a plain text table that ships with hwdata. Linux only; macOS
@@ -529,14 +624,25 @@ if (( mem_total > 0 )); then
 else
   kv "RAM" ""
 fi
+# Swap appears only when it is actually being used, or under --all.
+# An untouched swap partition is the normal case and reporting 0% every
+# time trains the eye to skip the row — which is exactly when a real
+# 40% would go unnoticed.
 if (( swap_total > 0 )); then
-  meter "Swap" $(( swap_used * 100 / swap_total )) "$(hpair "$swap_used" "$swap_total")"
-elif [[ "$OS" == Linux ]]; then
+  swap_pct=$(( swap_used * 100 / swap_total ))
+  if (( swap_pct > 0 || show_all )); then
+    meter "Swap" "$swap_pct" "$(hpair "$swap_used" "$swap_total")"
+  fi
+elif (( show_all )) && [[ "$OS" == Linux ]]; then
   kv "Swap" "${D}none configured${R}"
 fi
+# Cache is not "used" memory — the kernel returns it on demand — but it
+# explains the gap between the RAM meter and what `free` reports.
+(( show_all && mem_cached > 0 )) && kv "Cached" "$(hkib "$mem_cached") ${D}${G_SEP} reclaimable${R}"
 
 # ── STORAGE ────────────────────────────────────────────────────────
 hr "STORAGE"
+disk_pct=()
 if have df; then
   declare -A seen_dev=()
   any=0
@@ -561,6 +667,11 @@ if have df; then
     (( ${#label} > LABEL_W )) && label="…${label: -$(( LABEL_W - 1 ))}"
     (( unicode )) || { label="$mnt"; (( ${#label} > LABEL_W )) && label="${label: -$LABEL_W}"; }
     meter "$label" "$pct" "$(hpair "$used" "$size")"
+    # Remembered so ATTENTION below can flag a full disk without
+    # repeating the filesystem-type whitelist. Re-deriving it there
+    # let /sys/firmware/efi/efivars through, which is a pseudo-fs whose
+    # "76% full" means nothing.
+    disk_pct+=( "$pct:$mnt" )
     any=1
   }
 
@@ -585,14 +696,33 @@ fi
 
 # ── STATUS ─────────────────────────────────────────────────────────
 hr "STATUS"
+if [[ -n "$proc_count" ]]; then
+  kv "Processes" "$proc_count"
+fi
 if [[ -n "$load_txt" ]]; then
   # Trim so the separator does not end up doubly spaced: load_txt is
   # column-padded, and extra already carries its own leading separator.
   load_txt="${load_txt%"${load_txt##*[![:space:]]}"}"
+  # Load is only meaningful against the core count: 4.0 is idle on a
+  # 64-thread box and a queue on a dual-core one. The 1-minute figure is
+  # scored against the threads available.
   extra=''
-  [[ -n "$proc_count" ]] && extra+=" ${G_SEP} ${proc_count} procs"
-  (( threads )) && extra+=" ${G_SEP} ${threads} threads"
+  (( threads )) && extra=" ${G_SEP} ${threads} threads"
+  l1="${load_txt%% *}"; l1int="${l1%%.*}"
+  if (( threads > 0 )) && [[ -n "$l1int" && "$l1int" != *[!0-9]* ]]; then
+    lpct=$(( l1int * 100 / threads ))
+    if   (( lpct >= 100 )); then extra+=" ${G_SEP} saturated"
+    elif (( lpct >= 70  )); then extra+=" ${G_SEP} busy"
+    fi
+  fi
   kv "Load" "$load_txt${D}${extra}${R}"
+fi
+
+# Logged-in sessions. `who` is coreutils and reads utmp, which a shell
+# cannot parse itself (it is a binary record format).
+if have who; then
+  sessions="$(who 2>/dev/null | grep -c . || true)"
+  [[ -n "$sessions" && "$sessions" != 0 ]] && kv "Sessions" "$sessions logged in"
 fi
 
 if [[ -n "$temp_c" ]]; then
@@ -603,7 +733,16 @@ if [[ -n "$temp_c" ]]; then
   kv "Temperature" "${tcol}${temp_c}${G_DEG}${R}"
 fi
 
-[[ -n "$bat_pct" ]] && meter "Battery" "$bat_pct" "${bat_state:-unknown}"
+if [[ -n "$bat_pct" ]]; then
+  meter "Battery" "$bat_pct" "${bat_state:-unknown}"
+  if [[ -n "$bat_health" ]]; then
+    if   (( bat_health < 65 )); then hcol=$RED
+    elif (( bat_health < 80 )); then hcol=$YEL
+    else                             hcol=$GRN
+    fi
+    kv "Health" "${hcol}${bat_health}%${R} ${D}of design capacity${R}"
+  fi
+fi
 
 # ── Network ────────────────────────────────────────────────────────
 # Linux exposes routes and addresses as files. Elsewhere there is no
@@ -676,6 +815,36 @@ if [[ "$OS" == Linux ]]; then
   done
   (( shown )) || kv "Network" "${D}no active interface${R}"
   (( virtual )) && kv "" "${D}+ ${virtual} virtual (docker/bridge) ${G_SEP} see --all${R}"
+fi
+
+# ── ATTENTION ──────────────────────────────────────────────────────
+# The only section that can be absent entirely. Everything above is
+# description; this is the part that asks for an action, so it must not
+# appear unless there is one. A permanent "nothing to report" banner
+# teaches the eye to skip precisely the lines that will matter later.
+attention=()
+
+[[ -e /var/run/reboot-required || -e /run/reboot-required ]] \
+  && attention+=( "${YEL}reboot required${R}${D} ${G_SEP} a package needs it to finish${R}" )
+
+# A filesystem past 90% is the classic overnight outage. Reuses the
+# entries STORAGE already vetted, so pseudo-filesystems cannot appear.
+for entry in "${disk_pct[@]}"; do
+  p="${entry%%:*}"; mnt="${entry#*:}"
+  (( p >= 90 )) && attention+=( "${RED}${mnt} is ${p}% full${R}" )
+done
+
+[[ -n "$temp_c" ]] && (( temp_c >= 85 )) \
+  && attention+=( "${RED}CPU at ${temp_c}${G_DEG}${R}${D} ${G_SEP} thermal throttling likely${R}" )
+
+[[ -n "$bat_health" ]] && (( bat_health < 65 )) \
+  && attention+=( "${YEL}battery at ${bat_health}% of design capacity${R}" )
+
+if (( ${#attention[@]} )); then
+  hr "ATTENTION"
+  for a in "${attention[@]}"; do
+    printf '    %s%s%s %s\n' "$YEL" "$G_UP" "$R" "$a"
+  done
 fi
 
 printf '\n'
