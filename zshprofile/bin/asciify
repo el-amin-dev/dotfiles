@@ -1,0 +1,154 @@
+#!/usr/bin/env zsh
+# ════════════════════════════════════════════════════════════════════
+#  asciify — render a string as block-letter art. No external deps.
+#
+#  Everything is done with zsh builtins: an associative array holds a
+#  5-row font, and parameter expansion does the splitting, substitution
+#  and padding. Nothing is spawned, so this is fast enough to sit in a
+#  banner that renders on demand.
+#
+#  Usage:
+#      asciify "HELLO"
+#      echo "HI" | asciify
+#      asciify --char '#' "ASCII"        # non-UTF-8 terminals
+#      asciify --gap 1 --trim "TIGHT"
+#
+#  Options:
+#      --char C     block glyph to draw with (default █)
+#      --gap N      spaces between letters (default 2)
+#      --trim       strip trailing whitespace from each row
+#      --width N    print nothing and exit 1 if wider than N columns;
+#                   lets a caller lay out a banner without measuring
+#      -h, --help   this text
+#
+#  Unsupported characters render as a blank space rather than failing,
+#  so arbitrary input is always safe to pass.
+# ════════════════════════════════════════════════════════════════════
+emulate -L zsh
+setopt no_unset
+
+# 5-row block font. Each glyph is 5 lines joined by "|".
+# A "." inside a glyph is a SPACER: it becomes a space at render time,
+# and exists only so narrow letters keep their columns aligned in the
+# source above.
+typeset -A FONT
+FONT[A]=" ██ |█  █|████|█  █|█  █"
+FONT[B]="███ |█  █|███ |█  █|███ "
+FONT[C]=" ███|█   |█   |█   | ███"
+FONT[D]="███ |█  █|█  █|█  █|███ "
+FONT[E]="████|█   |███ |█   |████"
+FONT[F]="████|█   |███ |█   |█   "
+FONT[G]=" ███|█   |█ ██|█  █| ███"
+FONT[H]="█  █|█  █|████|█  █|█  █"
+FONT[I]="███|.█.|.█.|.█.|███"
+FONT[J]="  ██|   █|   █|█  █| ██ "
+FONT[K]="█  █|█ █ |██  |█ █ |█  █"
+FONT[L]="█   |█   |█   |█   |████"
+FONT[M]="█   █|██ ██|█ █ █|█   █|█   █"
+FONT[N]="█  █|██ █|█ ██|█  █|█  █"
+FONT[O]=" ██ |█  █|█  █|█  █| ██ "
+FONT[P]="███ |█  █|███ |█   |█   "
+FONT[Q]=" ██ |█  █|█  █|█ ██| ███"
+FONT[R]="███ |█  █|███ |█ █ |█  █"
+FONT[S]=" ███|█   | ██ |   █|███ "
+FONT[T]="█████|..█..|..█..|..█..|..█.."
+FONT[U]="█  █|█  █|█  █|█  █| ██ "
+FONT[V]="█   █|█   █|█   █| █ █ |  █  "
+FONT[W]="█   █|█   █|█ █ █|██ ██|█   █"
+FONT[X]="█  █| █ █ |  █  | █ █ |█  █"
+FONT[Y]="█   █| █ █ |  █  |  █  |  █  "
+FONT[Z]="████|  █ | █  |█   |████"
+FONT[0]=" ██ |█  █|█  █|█  █| ██ "
+FONT[1]=" █ |██ | █ | █ |███"
+FONT[2]="██ |  █| █ |█  |███"
+FONT[3]="██ |  █| ██|  █|██ "
+FONT[4]="█  █|█  █|████|   █|   █"
+FONT[5]="███|█  | ██|  █|██ "
+FONT[6]=" ██|█  |███|█ █|███"
+FONT[7]="███|  █| █ | █ | █ "
+FONT[8]="███|█ █|███|█ █|███"
+FONT[9]="███|█ █|███|  █|██ "
+FONT[' ']="  |  |  |  |  "
+FONT[.]="  |  |  |  |█ "
+FONT[!]="█|█|█| |█"
+FONT[?]="██ |  █| █ |   | █ "
+FONT[-]="   |   |███|   |   "
+FONT[_]="   |   |   |   |████"
+FONT[+]="   | █ |███| █ |   "
+FONT[:]="  |█ |  |█ |  "
+FONT['/']="   █|  █ | █  |█   |    "
+FONT['@']=" ██ |█  █|█ ██|█   | ███"
+
+local block='█' gap=2 trim=0 maxw=0 input=''
+
+while (( $# )); do
+  case $1 in
+    --char)  shift; block=${1:-█} ;;
+    --gap)   shift; gap=${1:-2} ;;
+    --trim)  trim=1 ;;
+    --width) shift; maxw=${1:-0} ;;
+    -h|--help)
+      # Print the header block above, minus the comment markers.
+      local l
+      while IFS= read -r l; do
+        [[ $l == '#'* ]] || break
+        print -r -- "${l/\# /}"
+      done < <(tail -n +2 -- $0)
+      return 0 ;;
+    --) shift; break ;;
+    -*) print -ru2 -- "asciify: unknown option $1"; return 2 ;;
+    *)  break ;;
+  esac
+  shift
+done
+
+# Remaining args are the text; otherwise read a line from stdin. Reading
+# stdin lets this be piped, which is how it composes with anything else.
+if (( $# )); then
+  input="$*"
+else
+  IFS= read -r input || input=''
+fi
+
+[[ -z $input ]] && return 0
+
+input=${(U)input}
+
+local -a rows
+rows=('' '' '' '' '')
+
+local i ch glyph line r
+local -a lines
+# Gap spaces, built by left-padding an empty string. The parameter has
+# to be NAMED: `${(l:n:: :)}` with nothing to expand trips `no_unset`.
+local _empty=''
+local spacer="${(l:$gap:: :)_empty}"
+
+for (( i = 1; i <= ${#input}; i++ )); do
+  ch=${input[i]}
+  glyph=${FONT[$ch]:-${FONT[' ']}}
+  lines=("${(@s:|:)glyph}")
+  for r in {1..5}; do
+    line=${lines[r]//./ }            # spacer dots become spaces
+    [[ $block != '█' ]] && line=${line//█/$block}
+    rows[r]+="${line}${spacer}"
+  done
+done
+
+# Refuse rather than wrap: a banner that wraps is worse than no banner,
+# and the caller cannot know the rendered width without asking.
+if (( maxw > 0 )); then
+  local widest=0
+  for r in {1..5}; do (( ${#rows[r]} > widest )) && widest=${#rows[r]}; done
+  (( widest > maxw )) && return 1
+fi
+
+for r in {1..5}; do
+  line=${rows[r]}
+  # Strip trailing blanks without needing EXTENDED_GLOB, which
+  # `emulate -L zsh` does not turn on: cut everything after the last
+  # non-blank character.
+  (( trim )) && line=${line%"${line##*[![:space:]]}"}
+  print -r -- "$line"
+done
+return 0

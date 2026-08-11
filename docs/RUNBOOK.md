@@ -41,13 +41,27 @@ zshconf                  # open this config repo in $EDITOR (also: zshrc)
 Commands shipped by this repo live in `zshprofile/bin/`, which `00-env.zsh` puts on `$PATH`:
 
 ```bash
-my-computer              # hardware, software and live status report
-my-computer --all        # include docker/veth/bridge interfaces
-my-computer --ascii      # ASCII frame and meters (non-UTF-8 terminals)
-my-computer --no-color   # plain text, also automatic when piped
-my-computer --width 80   # override the auto-detected width
+my-computer                    # hardware, software and live status report
+my-computer --all              # verbose: virtual interfaces, swap at 0%, locale, cache
+my-computer --ascii            # ASCII frame and meters (non-UTF-8 terminals)
+my-computer --no-color         # plain text, also automatic when piped
+my-computer --no-banner        # skip the block-letter banner
+my-computer --banner HELLO     # render different banner text
+my-computer --width 80         # override the auto-detected width
 my-computer --help
+
+asciify "HELLO"                # block-letter art, pure zsh
+echo HI | asciify --trim       # reads stdin too
+asciify --char '#' "ASCII"     # ASCII-safe glyph
+asciify --width 40 "FITS?"     # prints nothing, exits 1, if wider than 40
 ```
+
+`my-computer` draws its banner by calling `asciify`; if `asciify` is missing or the render would be
+wider than the terminal, it falls back to a boxed header without comment.
+
+An **ATTENTION** section appears at the end *only when something needs doing* — a pending reboot, a
+filesystem past 90%, a CPU at 85°C, or a battery below 65% of design capacity. On a healthy machine
+it is absent entirely, so its presence always means something.
 
 `my-computer` needs no system-info package: it reads `/proc`, `/sys` and `/etc/os-release` on Linux,
 and `sysctl`/`sw_vers`/`vm_stat`/`pmset` on macOS. Anything the platform will not report shows as a
