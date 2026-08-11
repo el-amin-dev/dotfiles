@@ -220,6 +220,30 @@ else
   pass "SHARE_HISTORY unset (per ADR-005)"
 fi
 
+# HIST_FCNTL_LOCK must track the filesystem, not be set unconditionally.
+# fcntl() locking over NFS/SMB blocks with no error and no timeout when
+# the server's lock manager is unreachable, which hangs the shell before
+# it accepts any input. The decision has to match reality on THIS
+# machine — the same config is correct on a laptop and fatal on a box
+# with a network-mounted home. See ADR-006.
+hist_dir="$(probe HISTFILE)"; hist_dir="${hist_dir%/*}"
+hist_fs="$(stat -f -c %T "$hist_dir" 2>/dev/null || echo unknown)"
+lock_on=no
+ZDOTDIR="$PROFILE_DIR" zsh -i -c '[[ -o histfcntllock ]]' 2>/dev/null && lock_on=yes
+case "$hist_fs" in
+  nfs*|smb*|cifs*|fuse*|afs*|9p*|glusterfs|lustre*|ceph*|unknown) want=no ;;
+  *) want=yes ;;
+esac
+if [[ "$lock_on" == "$want" ]]; then
+  if [[ "$want" == yes ]]; then
+    pass "HIST_FCNTL_LOCK on, history is on local '$hist_fs'"
+  else
+    pass "HIST_FCNTL_LOCK correctly OFF, history is on '$hist_fs'"
+  fi
+else
+  fail "HIST_FCNTL_LOCK=$lock_on but history is on '$hist_fs' — locking there can hang the shell at startup"
+fi
+
 # ── 7. $HOME stays clean ───────────────────────────────────────────
 # The repo's one promise about $HOME is that it holds a single symlink,
 # ~/.zshrc, and nothing else. Runtime state belongs in cache/.
