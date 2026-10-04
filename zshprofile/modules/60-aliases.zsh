@@ -203,6 +203,26 @@ alias zshconf='${EDITOR:-vim} "$ZSH_PROFILE_DIR"'   # open this config repo
 alias zshrc='zshconf'                      # kept for muscle memory
 (( $+commands[btop] )) && alias top='btop'
 
+# ── Packages: one vocabulary, whichever distro is underneath ───────
+# Same muscle memory on Ubuntu and Fedora; $ZSH_OS_FAMILY comes from
+# 00-env.zsh. Unknown distros get no aliases rather than wrong ones.
+case "$ZSH_OS_FAMILY" in
+  debian)
+    alias pkgi='sudo apt install'
+    alias pkgr='sudo apt remove'
+    alias pkgu='sudo apt update && sudo apt upgrade'
+    alias pkgs='apt search'
+    alias pkgf='dpkg -S'                   # which package owns a file
+    ;;
+  fedora)
+    alias pkgi='sudo dnf install'
+    alias pkgr='sudo dnf remove'
+    alias pkgu='sudo dnf upgrade --refresh'
+    alias pkgs='dnf search'
+    alias pkgf='rpm -qf'                   # which package owns a file
+    ;;
+esac
+
 # ── Guarded destructive commands ───────────────────────────────────
 # These DO shadow standard tools, which the no-shadowing rule allows
 # only here: the flags are additive prompts, no behaviour is removed,

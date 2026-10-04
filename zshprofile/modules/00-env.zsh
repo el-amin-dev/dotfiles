@@ -39,6 +39,24 @@ export HISTFILE="$ZSH_CACHE_DIR/zsh_history"
 #     env -i HOME="$HOME" PATH="$PATH" zsh -i -c 'echo $ZSH_COMPDUMP'
 export ZSH_COMPDUMP="$ZSH_CACHE_DIR/zcompdump"
 
+# ── Distro family: debian | fedora | other ─────────────────────────
+# Read once from /etc/os-release so later modules branch on one value
+# instead of each probing the system. ID_LIKE covers derivatives: Mint
+# and Pop!_OS say "ubuntu debian", Rocky and Alma say "rhel fedora".
+# Parsed in-shell with zsh's own file reader — no fork at startup.
+export ZSH_OS_FAMILY="other"
+() {
+  [[ -r /etc/os-release ]] || return
+  local line ids=""
+  for line in "${(@f)$(</etc/os-release)}"; do
+    [[ "$line" == (ID|ID_LIKE)=* ]] && ids+=" ${${line#*=}//\"/}"
+  done
+  case " $ids " in
+    *" debian "*|*" ubuntu "*)          ZSH_OS_FAMILY="debian" ;;
+    *" fedora "*|*" rhel "*|*" centos "*) ZSH_OS_FAMILY="fedora" ;;
+  esac
+}
+
 # ── Resolve real binary names for renamed tools ────────────────────
 # Debian and Ubuntu ship fd as `fdfind` and bat as `batcat`. The
 # aliases in 60-aliases.zsh cover typing those names interactively, but

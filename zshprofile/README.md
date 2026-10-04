@@ -64,7 +64,7 @@ local overrides — which load last so they always win.
 
 ## Requirements
 
-- Ubuntu / Debian-based Linux (uses `apt`)
+- Ubuntu / Debian (`apt`) or Fedora (`dnf`)
 - A terminal capable of using a Nerd Font
 
 The installer provisions everything else, including the toolchain and a
@@ -85,7 +85,9 @@ chmod +x install.sh
 The installer is **idempotent** — re-running it only performs missing
 steps. It will:
 
-1. Install the CLI toolchain via `apt`
+1. Detect the distro from `/etc/os-release` and install the CLI toolchain
+   via `apt` (Ubuntu/Debian) or `dnf` (Fedora/RHEL); optional tools that a
+   distro lacks are skipped with a warning
    (`zsh fzf zoxide eza bat ripgrep fd-find btop tmux`).
 2. Clone Oh My Zsh into `external/oh-my-zsh/`.
 3. Clone the Spaceship theme into Oh My Zsh's custom themes.
@@ -116,7 +118,7 @@ Then open a new terminal, or run `exec zsh`.
 | `eza` | Modern `ls` with Git awareness and tree view |
 | `bat` | Syntax-highlighted `cat` and man pager |
 | `ripgrep` | Fast `grep` |
-| `fd` | Fast `find` (Ubuntu: `fdfind`) |
+| `fd` | Fast `find` (Debian/Ubuntu: `fdfind`) |
 | `btop` | Resource monitor |
 | `tmux` | Terminal multiplexer |
 

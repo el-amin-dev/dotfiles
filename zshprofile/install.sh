@@ -16,14 +16,41 @@ THEMES_DIR="$OMZ_DIR/custom/themes"
 log()  { printf '\033[1;32m▸ %s\033[0m\n' "$1"; }
 skip() { printf '\033[1;33m• %s (already present, skipping)\033[0m\n' "$1"; }
 
-# ── 1. System packages (the modern CLI stack you listed) ───────────
-log "Installing system packages via apt…"
-sudo apt update -qq
-sudo apt install -y \
-  zsh git curl unzip \
-  fzf zoxide eza bat ripgrep fd-find btop tmux \
-  fontconfig
-# Ubuntu ships fd as 'fdfind' and bat as 'batcat' — aliases in 60 handle it.
+warn() { printf '\033[1;31m! %s\033[0m\n' "$1"; }
+
+# ── 1. System packages (Ubuntu/Debian or Fedora, by os-release) ────
+# CORE must install or nothing works; TOOLS are nice-to-have and go one
+# at a time, so a package missing from one distro's repos (eza on older
+# Ubuntu, say) is reported and skipped instead of aborting the install.
+# Package names happen to match on both families; the binaries don't —
+# Debian ships fd as 'fdfind' and bat as 'batcat', which 00-env resolves.
+CORE="zsh git curl unzip fontconfig"
+TOOLS="fzf zoxide eza bat ripgrep fd-find btop tmux"
+
+os_ids=""
+if [[ -r /etc/os-release ]]; then
+  os_ids="$(. /etc/os-release; echo " ${ID:-} ${ID_LIKE:-} ")"
+fi
+case "$os_ids" in
+  *" debian "*|*" ubuntu "*)
+    log "Detected Debian/Ubuntu — using apt…"
+    sudo apt update -qq
+    pkg_install() { sudo apt install -y "$@"; }
+    ;;
+  *" fedora "*|*" rhel "*|*" centos "*)
+    log "Detected Fedora/RHEL — using dnf…"
+    pkg_install() { sudo dnf install -y "$@"; }
+    ;;
+  *)
+    warn "Unsupported distro. Install manually: $CORE $TOOLS"
+    exit 1
+    ;;
+esac
+
+pkg_install $CORE
+for p in $TOOLS; do
+  pkg_install "$p" >/dev/null 2>&1 || warn "optional package unavailable: $p"
+done
 
 # ── 2. Oh My Zsh → into the repo, NOT ~/.oh-my-zsh ─────────────────
 if [[ -d "$OMZ_DIR" ]]; then
