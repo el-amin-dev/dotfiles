@@ -514,6 +514,11 @@ collect_linux() {
     # status file, which also lists packages removed but not purged.
     shopt -s nullglob; local l=( /var/lib/dpkg/info/*.list ); shopt -u nullglob
     (( ${#l[@]} )) && pkgs="${#l[@]} dpkg"
+  elif command -v rpm >/dev/null 2>&1; then
+    # Fedora/RHEL keep packages in an sqlite db, so there is no glob to
+    # count — one rpm call printing a dot per package, measured by length.
+    local d; d="$(rpm -qa --qf . 2>/dev/null)"
+    (( ${#d} )) && pkgs="${#d} rpm"
   fi
 
   local dmi=/sys/devices/virtual/dmi/id vendor product bv bd
